@@ -4,8 +4,7 @@
 Adds an LFO modulator to a Polysynth and maps it to the Polysynth's first remote
 parameter at depth 0.8. Plays a 4-bar held note so the modulation is audible.
 """
-import time
-from openwig import Song
+from openwig import Song, Note
 
 
 def main():
@@ -28,7 +27,7 @@ def main():
     print(f"  map -> {res}")
 
     # Hold a long note across the whole song so the modulation is audible
-    lead.clip([(60, 0, float(s.total), 0.85)])
+    lead.clip([Note(60, 0, dur=float(s.total), vel=0.85)])
 
     s.play(loop=True)
     print(f"playing {s.bars}-bar drone with Beat LFO -> remote 0 (depth 0.8)")

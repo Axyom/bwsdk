@@ -12,7 +12,7 @@ with gaps (the silences between sections), instead of one clip spanning the song
 
 Clears the project first. No render; plays a loop at the end.
 """
-from openwig import Song
+from openwig import Song, Note
 
 PROG = [([57, 60, 64], 33),   # Am
         ([53, 57, 60], 29),   # F
@@ -28,7 +28,7 @@ def gen_chords(abss, length):
     out, seg = [], 0
     while seg < length:
         tri, _ = chord_at(abss + seg)
-        out += [(n, seg, min(4, length - seg), 0.5) for n in tri]
+        out += [Note(n, seg, dur=min(4, length - seg), vel=0.5) for n in tri]
         seg += 4
     return out
 
@@ -37,13 +37,13 @@ def gen_bass(abss, length):
     out = []
     for b in range(int(length)):
         _, root = chord_at(abss + b)
-        out.append((root, b + 0.5, 0.4, 0.85))   # offbeat root
+        out.append(Note(root, b + 0.5, dur=0.4, vel=0.85))   # offbeat root
     return out
 
 
-def kick(length):  return [(36, b, 0.25, 1.0) for b in range(int(length))]
-def clap(length):  return [(39, b, 0.20, 0.9) for b in range(1, int(length), 2)]   # backbeat
-def hats(length):  return [(42, b + 0.5, 0.20, 0.6) for b in range(int(length))]   # offbeat
+def kick(length):  return [Note(36, b, dur=0.25) for b in range(int(length))]
+def clap(length):  return [Note(39, b, dur=0.20, vel=0.9) for b in range(1, int(length), 2)]   # backbeat
+def hats(length):  return [Note(42, b + 0.5, dur=0.20, vel=0.6) for b in range(int(length))]   # offbeat
 
 
 def main():

@@ -4,15 +4,14 @@
 KICK on 4-on-floor, BASS holds a sustained note. Compressor+ on BASS is
 sidechained to KICK's signal -> BASS should duck on every kick.
 """
-import time
-from openwig import Song
+from openwig import Song, Note
 
 
 def main():
     s = Song(tempo=128, bars=4, clean=True)
 
     kick = s.track("KICK", device="v9 Kick")
-    kick.clip([(36, b, 0.25, 1.0) for b in range(int(s.total))])
+    kick.clip([Note(36, b, dur=0.25) for b in range(int(s.total))])
     kick.fader(0.85)
 
     bass = s.track("BASS", device="FM-4")
@@ -22,7 +21,7 @@ def main():
     bass._set_remote("Ratio", 0.80)
     bass._set_remote("Attack", 0.05)
     bass._set_remote("Release", 0.30)
-    bass.clip([(33, 0, float(s.total), 0.85)])
+    bass.clip([Note(33, 0, dur=float(s.total), vel=0.85)])
 
     # Wire BASS's Compressor+ sidechain input from KICK's signal
     bass.sidechain_from(kick, sink_device_index=1)
