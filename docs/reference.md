@@ -38,7 +38,7 @@ s = Song(tempo=128, bars=16, clean=True)
 | `s.metronome(on)` | Toggle metronome. |
 | `s.undo(n)` / `s.redo(n)` | Undo/redo N steps. |
 | `s.panel(layout)` | Switch panel: `"ARRANGE"` / `"MIX"` / `"EDIT"` / `"PLAY"`. |
-| `s.marker(name)` | Drop a cue marker at the current playhead. |
+| `s.marker()` | Drop a cue marker at the current playhead (Bitwig auto-names it). |
 | `s.scene_launch(index)` | Launch a scene. |
 | `s.stop_all()` | Stop all clip slots. |
 | `s.save()` | Save project in place. |
@@ -52,7 +52,11 @@ s = Song(tempo=128, bars=16, clean=True)
 
 ## Track
 
-All methods return `self` - they are chainable.
+Most `Track` methods mutate and return `self`, so they chain
+(`track.fx(...).clip(...)`). The query methods - `describe_clip`,
+`remote_pages`, `list_modulators`, `routing_info`, `map_modulator`,
+`set_clip_prop`, `open_modulator_browser` - return data instead, so call them
+at the end of a chain, not in the middle.
 
 ### Channel strip
 

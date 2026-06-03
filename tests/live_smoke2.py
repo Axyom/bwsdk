@@ -42,7 +42,7 @@ def main():
     # tempo automation + markers + transport
     step("Song.automate_tempo",
          lambda: s.automate_tempo([(0, 128), (8, 140)]))
-    step("Song.marker", lambda: s.marker("drop", 4.0))
+    step("Song.marker", lambda: s.marker())
     step("Song.undo", lambda: s.undo())
     step("Song.redo", lambda: s.redo())
     step("Song.stop_all", lambda: s.stop_all())

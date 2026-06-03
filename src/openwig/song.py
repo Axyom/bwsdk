@@ -25,10 +25,11 @@ Example:
 """
 import os
 import time
+import warnings
 from typing import NamedTuple
 from openwig.wire import automation as wa
 from openwig.wire.render import render_to_wav
-from openwig.bridge import BridgeClient
+from openwig.bridge import BridgeClient, BridgeError
 
 
 class Note(NamedTuple):
@@ -134,13 +135,17 @@ class Track:
 
     def arm(self, on=True):
         """Main-bank only; effect tracks aren't armable."""
-        if self.bank == "effect": return self
+        if self.bank == "effect":
+            warnings.warn(f"arm() ignored: '{self.name}' is an effect track (not armable)", stacklevel=2)
+            return self
         self.s.b.request("track.set_arm", {"index": self.idx, "on": bool(on)})
         time.sleep(0.03); return self
 
     def monitor(self, mode="AUTO"):
         """Main-bank only; mode: 'OFF' | 'AUTO' | 'ON'."""
-        if self.bank == "effect": return self
+        if self.bank == "effect":
+            warnings.warn(f"monitor() ignored: '{self.name}' is an effect track", stacklevel=2)
+            return self
         self.s.b.request("track.set_monitor", {"index": self.idx, "mode": mode})
         time.sleep(0.03); return self
 
@@ -152,7 +157,9 @@ class Track:
     def send(self, send_index, value):
         """Set a send level (send_index 0..NUM_SENDS-1) - main-bank only.
         Effect tracks RECEIVE sends; they don't send themselves."""
-        if self.bank == "effect": return self
+        if self.bank == "effect":
+            warnings.warn(f"send() ignored: '{self.name}' is an effect track (effect tracks receive sends, they don't send)", stacklevel=2)
+            return self
         self.s.b.request("track.set_send",
                          {"index": self.idx, "send": int(send_index), "value": float(value)})
         time.sleep(0.03); return self
@@ -188,6 +195,9 @@ class Track:
         for r in rem:
             if r.get("exists") and sub.lower() in ("" + (r.get("name") or "")).lower():
                 self.s.b.request("device.set_remote", {"index": r["index"], "value": val}); return r["name"]
+        names = [r.get("name") for r in rem if r.get("exists")]
+        warnings.warn(f"no remote parameter matching {sub!r} on this device; ignored. "
+                      f"Available on the active page: {names}", stacklevel=3)
         return None
 
     # ── clips / notes ─────────────────────────────────────────────────────────
@@ -200,6 +210,10 @@ class Track:
         self.select()
         payload_notes = []
         for nt in notes:
+            if len(nt) < 4:
+                raise ValueError(
+                    f"each note needs at least (key, start, dur, vel); got {nt!r}. "
+                    f"Use Note(key, start, dur=..., vel=...) or a 4+ element tuple.")
             key, st, du, vel = nt[0], nt[1], nt[2], nt[3]
             ch = nt[4] if len(nt) > 4 else 0
             payload_notes.append([int(ch), int(key), float(st), float(du), float(vel)])
@@ -301,6 +315,7 @@ class Track:
         """Set a NoteStep attribute on the currently-selected clip's note at (x, key).
         attr: 'duration' | 'velocity' | 'release' | 'chance' | 'pressure' | 'timbre'
               | 'pan' | 'transpose' | 'gain'. value: numeric (0..1 for most)."""
+        self.select()
         self.s.b.request("clip.set_step_attr",
                          {"x": int(x), "y": int(key), "attr": attr, "value": float(value)})
         return self
@@ -385,16 +400,20 @@ class Track:
         })
 
     def transpose_cursor(self, semitones):
-        """Transpose the currently-selected clip (cursor) by N semitones."""
+        """Transpose this track's selected clip by N semitones."""
+        self.select()
         self.s.b.request("clip.transpose", {"semitones": int(semitones)}); return self
 
     def quantize_cursor(self, amount=1.0):
-        """Quantize the currently-selected clip's notes (0..1)."""
+        """Quantize this track's selected clip's notes (0..1)."""
+        self.select()
         self.s.b.request("clip.quantize", {"amount": float(amount)}); return self
 
     # ── mix / automation ──────────────────────────────────────────────────────
     def fader(self, level):
-        self.s.b.request(self._ns("set_volume"), {"index": self.idx, "value": float(level)})
+        """Volume. 0.0 = silent, 1.0 = unity; clamped to [0, 1]."""
+        v = max(0.0, min(1.0, float(level)))
+        self.s.b.request(self._ns("set_volume"), {"index": self.idx, "value": v})
         time.sleep(0.03); return self
 
     def automate(self, param, points, remote_index=0):
@@ -414,7 +433,9 @@ class Song:
             self.b = bridge; self._own_bridge = False
         else:
             self.b = BridgeClient(); self.b.start(); self._own_bridge = True
-            assert self.b.wait_connected(8), "bridge not connected (Bitwig + OpenwigBridge running?)"
+            if not self.b.wait_connected(8):
+                raise BridgeError("bridge not connected - is Bitwig running with the "
+                                  "OpenwigBridge controller enabled? (Settings -> Controllers)")
         # Refuse to run against an unsupported Bitwig version - the SDK reaches
         # into private internals that move across point releases. Set
         # check_version=False to bypass (advanced, may crash).
@@ -482,8 +503,10 @@ class Song:
             self.b.request = traced; self.b._traced = True
         return self
 
-    def marker(self, name=None):
-        """Drop a cue marker at the current playhead (Bitwig auto-names if name omitted)."""
+    def marker(self):
+        """Drop a cue marker at the current playhead. Bitwig names it automatically -
+        the controller call (Transport.addCueMarkerAtPlaybackPosition) takes no name,
+        so naming is not supported."""
         self.b.request("cue.add")
         time.sleep(0.05); return self
 
