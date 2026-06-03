@@ -56,7 +56,7 @@ python -m openwig doctor    # verify deps + controller + bridge
 
 ## Contributing
 
-Issues and PRs welcome. Currently Windows + Bitwig 6.0.6 only.
+Issues and PRs welcome. Currently Windows + Bitwig 6, tested on Bitwig 6.0.6 only.
 
 ## License
 
