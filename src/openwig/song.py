@@ -11,13 +11,15 @@ Consolidates the whole toolkit into Track/Song objects:
   * automation         (offline, controller internal-access path: volume / pan / device remote)
   * mix + master chain + render to .wav (loopback capture)
 
+Notes are plain (key, start_beat, duration, velocity) tuples - build them with
+ordinary Python.
+
 Example:
     from openwig import Song
-    s = Song(tempo=128, bars=16)
-    s.track("KICK", device="v9 Kick").clip(s.pulse(36, step=1.0))
+    s = Song(tempo=128, bars=4)
+    s.track("KICK", device="v9 Kick").clip([(36, b, 0.25, 1.0) for b in range(16)])
     (s.track("BASS", device="FM-4").fx("Filter").fx("Saturator", Drive=0.25)
-       .clip(s.pulse(33, step=1.0, off=0.5, dur=0.4, vel=0.85))
-       .pump(hi=0.82))
+       .clip([(33, b + 0.5, 0.4, 0.85) for b in range(16)]))
     s.master(["EQ+", "Compressor+", "Peak Limiter"])
     s.play(); print(s.render("song.wav"))
 """
@@ -391,19 +393,6 @@ class Track:
                                 "remote_index": remote_index})
         return self
 
-    def pump(self, active=None, hi=0.82, duck=0.30):
-        """Sidechain-style volume pump (duck on each beat) over `active` beat-ranges
-        (default: whole song). active: [(start,end), ...]."""
-        active = active or [(0, self.s.total)]
-        on = lambda bt: any(s <= bt < e for s, e in active)
-        pts = []
-        for beat in range(self.s.total):
-            if on(beat):
-                pts.append((float(beat), duck)); pts.append((beat + 0.80, hi))
-            else:
-                pts.append((float(beat), 0.0, 0.0, "hold"))
-        return self.automate("volume", pts)
-
 
 class Song:
     def __init__(self, tempo=128, bars=16, bridge=None, clean=False,
@@ -532,14 +521,6 @@ class Song:
                     if r.get("exists") and sub.lower() in ("" + (r.get("name") or "")).lower():
                         self.b.request("master.set_remote", {"index": r["index"], "value": val}); break
         return self
-
-    # ── pattern helpers ───────────────────────────────────────────────────────
-    def pulse(self, key, step=1.0, off=0.0, dur=0.5, vel=1.0):
-        """Repeating note every `step` beats, offset by `off`, for the whole song."""
-        out = []; b = off
-        while b < self.total:
-            out.append((key, b, dur, vel)); b += step
-        return out
 
     def play(self, loop=True):
         self.b.request("transport.set_position", {"beats": 0.0})

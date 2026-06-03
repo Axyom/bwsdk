@@ -7,26 +7,28 @@
 [![Python 3.11+](https://img.shields.io/badge/Python-3.11%2B-3776AB.svg)](#install)
 
 Goes where Bitwig's official Controller API can't: build arrangements, devices,
-modulators, sidechains, automation curves, and full multi-track songs from a
-Python program. Render to `.wav`, export to MIDI/JSON.
+modulators, sidechains, automation, and full multi-track songs from a Python
+program, then render to `.wav`.
 
 Free and open source (GPL-3.0). Windows only. Early beta.
 
 **[Documentation →](https://axyom.github.io/openwig/)**
 
+Notes are plain `(key, start_beat, duration, velocity)` tuples - build them with
+ordinary Python. openwig stays a thin layer over Bitwig; bring your own patterns.
+
 ```python
 from openwig import Song
 
-s = Song(tempo=128, bars=16, clean=True)
+s = Song(tempo=128, bars=4, clean=True)
 
 kick = s.track("KICK", device="v9 Kick")
 kick.fx("Saturator", Drive=0.20)
-kick.clip(s.pulse(36, step=1.0))
+kick.clip([(36, beat, 0.25, 1.0) for beat in range(16)])          # four-on-the-floor
 
 bass = s.track("BASS", device="FM-4")
 bass.fx("Filter")
-bass.clip(s.pulse(33, step=1.0, off=0.5, dur=0.4, vel=0.85))
-bass.pump(hi=0.82)
+bass.clip([(33, beat + 0.5, 0.4, 0.85) for beat in range(16)])    # offbeat root
 
 s.master(["EQ+", "Compressor+", "Peak Limiter"])
 s.play()

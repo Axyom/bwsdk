@@ -36,7 +36,7 @@ def main():
 
     s = Song(tempo=128, bars=2, clean=True)
     lead = s.track("LEAD", device="Polysynth")
-    lead.clip(s.pulse(60, step=0.5))
+    lead.clip([(60, i * 0.5, 0.4, 0.8) for i in range(s.total * 2)])
 
     # launcher scene + launch
     step("Track.scene", lambda: lead.scene(0, [(60, 0.0, 0.5, 0.8), (64, 0.5, 0.5, 0.8)]))

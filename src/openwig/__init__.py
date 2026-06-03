@@ -2,18 +2,16 @@
 
 Public API:
     from openwig import Song, Track
-    s = Song(tempo=128, bars=16, clean=True)
-    s.track("BASS", device="FM-4").clip(s.pulse(33, step=1.0))
+    s = Song(tempo=128, bars=4, clean=True)
+    s.track("BASS", device="FM-4").clip([(33, b, 0.5, 0.9) for b in range(16)])
     s.play(); s.render("out.wav")
 
+Notes are plain (key, start_beat, duration, velocity) tuples - build them with
+ordinary Python. openwig deliberately stays a thin layer over Bitwig and ships
+no note/curve/arrangement generators; bring your own.
+
 Submodules:
-    openwig.song              Song + Track (top-level composition API)
-    openwig.notes             note builders (pulse, walk, chord, hat)
-    openwig.curves            envelope builders (ramp, lfo, expo, hold)
-    openwig.arrangement       Section / genre templates
-    openwig.export            render-section, stems, MIDI export, JSON round-trip
-    openwig.lint              static checks on a Song before play/render
-    openwig.live              live observers + helpers
+    openwig.song              Song + Track (the composition API)
     openwig.bridge            low-level BridgeClient (advanced)
     openwig.wire              raw wire-protocol helpers (advanced)
 
@@ -36,9 +34,6 @@ from openwig.song import Song, Track  # noqa: E402
 from openwig.bridge import BridgeClient, BridgeError  # noqa: E402
 from openwig.wire.render import render_to_wav  # noqa: E402
 
-# ── helper submodules (importable as `from openwig import notes`) ────────
-from openwig import notes, curves, arrangement, export, lint, live  # noqa: E402,F401
-
 __all__ = [
     "__version__",
     "SUPPORTED_BITWIG_VERSIONS",
@@ -47,10 +42,4 @@ __all__ = [
     "BridgeClient",
     "BridgeError",
     "render_to_wav",
-    "notes",
-    "curves",
-    "arrangement",
-    "export",
-    "lint",
-    "live",
 ]

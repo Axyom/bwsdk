@@ -5,8 +5,6 @@ import tempfile
 from pathlib import Path
 
 from openwig import Song
-import openwig.notes as N
-import openwig.curves as C
 
 PASS, FAIL = [], []
 
@@ -25,12 +23,12 @@ def main():
 
     # track-creation variants
     kick = s.track("KICK", device="v9 Kick")
-    kick.clip(s.pulse(36, step=1.0))
+    kick.clip([(36, beat, 0.25, 1.0) for beat in range(s.total)])
     step("Song.audio_track", lambda: s.audio_track("AUD"))
     step("Song.fx_track", lambda: s.fx_track("RETURN", device="Reverb"))
 
     bass = s.track("BASS", device="FM-4")
-    bass.clip(N.euclidean(33, 5, 8))
+    bass.clip([(33, beat, 0.4, 0.85) for beat in range(s.total)])
 
     # modulators
     step("Track.add_modulator", lambda: bass.add_modulator("LFO"))
@@ -43,7 +41,7 @@ def main():
 
     # tempo automation + markers + transport
     step("Song.automate_tempo",
-         lambda: s.automate_tempo(C.ramp(128, 140, end_beat=8)))
+         lambda: s.automate_tempo([(0, 128), (8, 140)]))
     step("Song.marker", lambda: s.marker("drop", 4.0))
     step("Song.undo", lambda: s.undo())
     step("Song.redo", lambda: s.redo())
