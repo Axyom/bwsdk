@@ -30,7 +30,7 @@ print(s.render("song.wav"))
 
 - **Build songs** - tracks, clips, devices, mix, master chain.
 - **Modulators + sidechain** - fully programmatic, no GUI dragging.
-- **Automation** - offline (no playback needed) or recorded.
+- **Automation** - offline.
 - **Render** - to `.wav` via WASAPI loopback (Windows).
 
 ## Where to go next
