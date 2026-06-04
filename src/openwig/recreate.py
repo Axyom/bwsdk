@@ -33,18 +33,62 @@ import re
 from typing import Any
 
 
-def _factory_dir():
-    """Bitwig's factory device dir, or None if not resolvable (e.g. in CI)."""
+def _norm(s):
+    return "".join(c for c in str(s).lower() if c.isalnum())
+
+
+def _bitwig_dirs():
+    """(factory devices dir or None, [preset dirs]). Presets live in BOTH the
+    install library and the user library (~/Documents/Bitwig Studio/Library)."""
+    factory, preset_dirs = None, []
     try:
         from openwig.song import FACTORY
-        return FACTORY if _os.path.isdir(FACTORY) else None
+        if _os.path.isdir(FACTORY):
+            factory = FACTORY
+            p = _os.path.join(_os.path.dirname(FACTORY), "Presets")
+            if _os.path.isdir(p):
+                preset_dirs.append(p)
     except Exception:
-        return None
+        pass
+    user = _os.path.expanduser(_os.path.join("~", "Documents", "Bitwig Studio", "Library", "Presets"))
+    if _os.path.isdir(user):
+        preset_dirs.append(user)
+    return factory, preset_dirs
 
 
-def _is_plugin(name, factory_dir):
-    """A device that isn't a factory `.bwdevice` (VST/AU/etc.) - can't be recreated."""
-    return bool(name) and bool(factory_dir) and not _os.path.exists(f"{factory_dir}/{name}.bwdevice")
+def _build_preset_index(preset_dirs):
+    """{normalized preset name -> .bwpreset path} across all preset directories."""
+    idx = {}
+    for d in (preset_dirs or []):
+        try:
+            for root, _dirs, files in _os.walk(d):
+                for f in files:
+                    if f.endswith(".bwpreset"):
+                        idx.setdefault(_norm(f[:-len(".bwpreset")]), _os.path.join(root, f))
+        except Exception:
+            pass
+    return idx
+
+
+def _resolve_device(name, factory_dir, preset_idx):
+    """How to load a device by its chain name: ('factory', None) | ('preset', path) | ('unknown', None)."""
+    if not factory_dir:
+        return "factory", None      # can't verify (no Bitwig library) -> assume factory by name
+    if _os.path.exists(f"{factory_dir}/{name}.bwdevice"):
+        return "factory", None
+    p = preset_idx.get(_norm(name))
+    if p:
+        return "preset", p
+    return "unknown", None
+
+
+def _remote_kwargs(d):
+    parts = []
+    for r in [r for r in (d.get("remotes") or []) if r.get("name")][:4]:
+        val = r.get("value")
+        if isinstance(val, (int, float)):
+            parts.append(f"{_pyident(r['name'], 'p')}={_fmt_float(val)}")
+    return ", ".join(parts)
 
 _INSTRUMENT_HINTS = (
     "Polysynth", "FM-", "Phase-", "Sampler", "Drum Machine", "Kick", "Clap",
@@ -137,7 +181,8 @@ def _emit_song_open(data: dict) -> list[str]:
             f"s = Song(tempo={_fmt_float(tempo, 120.0)}, bars={bars}, clean=True)", ""]
 
 
-def _emit_track(t: dict, var: str, factory_dir=None) -> list[str]:
+def _emit_track(t: dict, var: str, factory_dir=None, preset_idx=None) -> list[str]:
+    preset_idx = preset_idx or {}
     lines: list[str] = []
     name = (t.get("name") or "").strip() or f"track_{t.get('index')}"
     kind = _classify_track(t)
@@ -147,12 +192,19 @@ def _emit_track(t: dict, var: str, factory_dir=None) -> list[str]:
         lines.append(f"{var} = s.audio_track({name!r})")
     else:
         first_dev = devs[0] if devs else None
-        if first_dev and not _is_plugin(first_dev["name"], factory_dir):
+        dkind, dpath = _resolve_device(first_dev["name"], factory_dir, preset_idx) if first_dev else ("none", None)
+        if dkind == "factory":
             lines.append(f"{var} = s.track({name!r}, device={first_dev['name']!r})")
+        elif dkind == "preset":
+            lines.append(f"{var} = s.track({name!r})")
+            lines.append(f"{var}.preset({dpath!r})   # {first_dev['name']}")
+            kw = _remote_kwargs(first_dev)
+            if kw:
+                lines.append(f"{var}.set_remotes({kw})")
         else:
             lines.append(f"{var} = s.track({name!r})")
             if first_dev:
-                lines.append(f"# instrument {first_dev['name']!r} is a plugin - load + configure it manually")
+                lines.append(f"# instrument {first_dev['name']!r}: no factory device / preset found - load manually")
 
     vol = t.get("volume")
     if vol is not None:
@@ -168,16 +220,17 @@ def _emit_track(t: dict, var: str, factory_dir=None) -> list[str]:
         dname = d.get("name") or ""
         if not dname:
             continue
-        if _is_plugin(dname, factory_dir):
-            lines.append(f"# {var}: plugin {dname!r} here - load + configure manually (plugin state isn't recreatable)")
-            continue
-        kw_parts = []
-        for r in [r for r in (d.get("remotes") or []) if r.get("name")][:4]:
-            val = r.get("value")
-            if not isinstance(val, (int, float)):
-                continue
-            kw_parts.append(f"{_pyident(r['name'], 'p')}={_fmt_float(val)}")
-        lines.append(f"{var}.fx({dname!r}" + ((", " + ", ".join(kw_parts)) if kw_parts else "") + ")")
+        dkind, dpath = _resolve_device(dname, factory_dir, preset_idx)
+        if dkind == "factory":
+            kw = _remote_kwargs(d)
+            lines.append(f"{var}.fx({dname!r}" + ((", " + kw) if kw else "") + ")")
+        elif dkind == "preset":
+            lines.append(f"{var}.preset({dpath!r})   # {dname}")
+            kw = _remote_kwargs(d)
+            if kw:
+                lines.append(f"{var}.set_remotes({kw})")
+        else:
+            lines.append(f"# {var}: {dname!r} - no factory device / preset found; load manually")
 
     clips = t.get("clips") or []
     for ci, c in enumerate(clips):
@@ -245,11 +298,12 @@ def to_script(data: dict, *, project_label: str = "untitled") -> str:
     """Render `data` (output of `read_project(b, with_clips=True)`) as a script."""
     lines: list[str] = [_emit_header(project_label, data)]
     lines.extend(_emit_song_open(data))
-    fdir = _factory_dir()
+    factory_dir, preset_dirs = _bitwig_dirs()
+    preset_idx = _build_preset_index(preset_dirs)
     for t in data.get("tracks", []):
         nm = (t.get("name") or "").strip()
         var = f"t_{t.get('index'):02d}_{_pyident(nm, str(t.get('index'))).lower()[:24]}"
-        lines.extend(_emit_track(t, var, fdir))
+        lines.extend(_emit_track(t, var, factory_dir, preset_idx))
     lines.extend(_emit_effect_tracks(data.get("effect_tracks") or []))
     lines.append("# Master chain not read back - fill in your master devices:")
     lines.append("# s.master(['EQ+', 'Compressor+', 'Peak Limiter'])")

@@ -189,6 +189,14 @@ class Track:
         self._fx_spec.append({"name": name, "remotes": dict(remotes)})
         return self
 
+    def set_remotes(self, **remotes):
+        """Set named remote-control values on the CURRENTLY-selected device (without
+        inserting a device). Names match ignoring spaces/dashes, like fx()."""
+        self.select()
+        for nm, val in remotes.items():
+            self._set_remote(nm, val)
+        return self
+
     def _set_remote(self, sub, val):
         rem = (self.s.b.request("state.snapshot").get("device") or {}).get("remotes", [])
         # normalize both sides (drop spaces/dashes/dots) so e.g. "Pre_delay"

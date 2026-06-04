@@ -15,7 +15,9 @@ any other openwig script to reconstruct the project.
 ## What it captures
 
 - **Tempo**, track names, mix (fader, pan, mute/solo/arm)
-- **Device chains** by name + each device's active remote-control values
+- **Device chains** - factory devices by name, **and presets** (including
+  saved/3rd-party ones like a Multiband-FX preset) loaded from your Library by
+  their `.bwpreset` path, plus each device's active remote-control values
 - **MIDI clips** - start, duration, and every note (key, start, duration,
   velocity, channel)
 - **Arranger automation** - volume/pan lanes, and device-parameter lanes with their
