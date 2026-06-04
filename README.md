@@ -38,10 +38,6 @@ print(s.render("song.wav"))
 |------------|---------------|--------|----|
 | 0.1.x      | **6.0.6**     | 3.11+  | Windows |
 
-The SDK reaches into Bitwig internals that move across releases, so it targets
-a specific Bitwig version. A mismatch refuses to connect with a clear error-
-bump the SDK when you bump Bitwig. Rendering uses WASAPI loopback (Windows).
-
 ## Install
 
 ```bash
