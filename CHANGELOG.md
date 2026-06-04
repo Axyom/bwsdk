@@ -5,6 +5,25 @@ All notable changes to openwig are documented here. This project follows
 
 ## [Unreleased]
 
+## [0.1.2] - 2026-06-04
+
+### Fixed
+- **Modulators no longer crash Bitwig.** `add_modulator` + `map_modulator` hit an
+  async-commit race - the mapping fired before the engine had instantiated the
+  modulator, crashing the native audio host. Fixed with a longer settle delay in
+  `add_modulator` and by resolving the mapping target through the canonical
+  float-param atom (the same resolution the automation path uses).
+- `openwig install` prints the correct controller path:
+  `Settings -> Controllers -> openwig -> Add -> OpenwigBridge`.
+- `render()` docstring documents its real return value (a dict
+  `{path, seconds, rate, channels, rms, silent}`, not a path string).
+
+### Docs
+- New **Examples** and **Songs** panels; every example is live-verified against
+  Bitwig.
+- **Nightdrive**: a ~3-minute progressive track with six evolving sections,
+  modulators, automation, and heavy per-bar micro-variation.
+
 ## [0.1.1] - 2026-06-03
 
 Slimmed to a barebones core: openwig is now a thin layer over Bitwig where you
