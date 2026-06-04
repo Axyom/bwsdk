@@ -3,9 +3,6 @@
 ## Note
 
 `Note(key, start, dur=0.5, vel=1.0, channel=0)` - a named tuple for one note.
-Interchangeable with a plain `(key, start, dur, vel)` tuple anywhere openwig
-takes notes (`clip`, `clips`, `scene`); the named fields and defaults just make
-calls readable.
 
 ```python
 from openwig import Note

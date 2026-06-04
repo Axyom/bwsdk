@@ -5,27 +5,6 @@ you can run against a clean Bitwig project.
 
 ## Nightdrive (~3 min progressive house/techno)
 
-96 bars at 128 BPM = 384 beats = **3:00**, arranged as six 16-bar blocks that
-each move the track forward:
-
-| Block      | Bars  | What changes |
-|------------|-------|--------------|
-| Intro      | 1-16  | Pad chord (Beat-LFO + auto-pan); kick enters at bar 4 |
-| Build      | 17-32 | Bass enters, the filter opens (automation ramp), hats fill in |
-| Drop 1     | 33-48 | Full groove: 16th hats, sidechain duck, `Am F C G` stabs |
-| Variation  | 49-64 | New progression `Dm Bb F C`, a lead melody, added shaker |
-| Breakdown  | 65-80 | Drums drop out; new pad voicing + auto-pan, a lead arp |
-| Drop 2     | 81-96 | Syncopated kick, rolling bass, busy hats, new lead, swell-in |
-
-Movement comes from **two Beat-LFO modulators** (on the bass filter and the pad),
-**automated** filter sweeps / sidechain duck / auto-pan / volume swell, an
-**evolving chord progression**, and bass/hats/lead variations per block. On top
-of that, heavy **micro-variation** keeps it from sounding looped: humanized
-velocities, ghost notes, occasional dropped hits, phrase-end kick/hat pushes,
-octave climbs, grace notes, and a **snare roll into every section change**. A
-seeded RNG makes it all reproducible. openwig ships no pattern helpers - the
-functions at the top are ordinary Python.
-
 ```python
 """Nightdrive - progressive house/techno, ~3 min, heavy micro-variation."""
 import math, random
