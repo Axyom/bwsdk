@@ -40,9 +40,6 @@ print(s.render("song.wav"))
 
 ## Compatibility
 
-| openwig | Bitwig Studio | Python |
-|------------|---------------|--------|
-| 0.1.x      | **6.0.6**     | 3.11+  |
-
-The SDK is **locked** to a specific Bitwig version. Mismatches refuse to
-connect with a clear error.
+| openwig | Bitwig Studio | Python | OS |
+|------------|---------------|--------|----|
+| 0.1.x      | **6.0.6**     | 3.11+  | Windows |
