@@ -345,7 +345,11 @@ class Track:
         self.select()
         path = f"{MODULATORS}/{name}.bwmodulator"
         res = self.s.b.request("modulator.insert", {"path": path, "x": int(x), "y": int(y)})
-        time.sleep(1.2)        # let async dispatch settle so subsequent map calls see it
+        # The insert is fire-and-forget on the document thread; the ENGINE then has to
+        # instantiate the modulator. Mapping it before the engine commits crashes the
+        # audio host, so wait generously here (the document shows the source much
+        # sooner, but the engine needs longer).
+        time.sleep(5.0)
         return self
 
     def open_modulator_browser(self):

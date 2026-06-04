@@ -1431,14 +1431,19 @@ var HANDLERS = {
             if (modList == null || modList.size() <= srcIdx) throw "source_index out of range";
             var src = modList.get(srcIdx);
 
-            // resolve destination value_atom
+            // resolve destination to the canonical float-param atom (fj) - the SAME
+            // resolution the automation path uses. Passing the raw target of a remote
+            // control here is a proxy atom the audio engine can't modulate, so the
+            // mapping syncs to the engine malformed and crashes the native host.
+            // _fjFrom() unwraps the proxy down to the real modulatable atom; for
+            // volume/pan the atom already IS an fj, so they are unaffected.
             var pp;
             if (dest === "volume") pp = cursorTrack.volume();
             else if (dest === "pan") pp = cursorTrack.pan();
             else pp = remoteControlsPage.getParameter(bget(p, "remote_index", 0) | 0);
-            var destAtom = pp.getDeepestTarget();
-            // try getAtom() unwrap (matches automation pattern)
-            try { var a = _invokeNoArg(destAtom, "getAtom"); if (a != null) destAtom = a; } catch (e) {}
+            var destAtom = _fjFrom(_invokeNoArg(pp.getDeepestTarget(), "getAtom"));
+            if (destAtom == null) destAtom = _fjFrom(pp.getDeepestTarget());
+            if (destAtom == null) throw "could not resolve target fj for dest '" + dest + "'";
 
             // build the cxu_2 set_default_modulation_mapping (op 3630, on class 766)
             // and call its executor: cxu_2.r3B(UO1, List)

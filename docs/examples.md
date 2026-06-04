@@ -91,6 +91,17 @@ pan = [(b * 0.25, 0.5 + 0.45 * math.sin(b * 0.4)) for b in range(64)]
 synth.automate("pan", pan)
 ```
 
+## Modulators
+
+```python
+synth.add_modulator("Beat LFO")          # insert a modulator (LFO, ADSR, Steps, ...)
+print(synth.list_modulators())
+synth.map_modulator(0, dest="remote", remote_index=0, amount=0.8)  # wire it to a param
+```
+
+`add_modulator` waits a few seconds for the engine to instantiate the modulator
+before returning, so the following `map_modulator` is safe.
+
 ## Sidechain between tracks
 
 ```python
