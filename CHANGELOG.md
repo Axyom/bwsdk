@@ -5,6 +5,14 @@ All notable changes to openwig are documented here. This project follows
 
 ## [Unreleased]
 
+### Removed
+- Modulator API (`Track.add_modulator` / `map_modulator` / `list_modulators` /
+  `open_modulator_browser`). Inserting and mapping a modulator can crash Bitwig's
+  audio engine under heavier use, so it's pulled until it's reliable - the 0.1.2
+  fix only covered the isolated case. The controller-side groundwork is kept for a
+  future re-integration. Compute movement with automation instead (an LFO you
+  build in Python and pass to `automate(...)`).
+
 ## [0.1.2] - 2026-06-04
 
 ### Fixed

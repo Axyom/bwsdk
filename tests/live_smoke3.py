@@ -1,7 +1,7 @@
 """Live smoke batch 3: remaining testable documented methods (launcher scenes,
 audio clips/samples, device selection, clip props, routing). GUI-dialog methods
-(save, save_as_dialog, open_dialog, new_project, open_modulator_browser) are
-documented but inherently pop a Bitwig dialog, so they're listed not run."""
+(save, save_as_dialog, open_dialog, new_project) are documented but inherently
+pop a Bitwig dialog, so they're listed not run."""
 import sys
 import tempfile
 import wave
@@ -63,7 +63,7 @@ def main():
     for lbl, err in FAIL:
         print(f"   FAIL {lbl}: {err}")
     print("\nGUI-dialog (documented, not auto-run): save, save_as_dialog, "
-          "open_dialog, new_project, open_modulator_browser")
+          "open_dialog, new_project")
     return 1 if FAIL else 0
 
 

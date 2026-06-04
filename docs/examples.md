@@ -24,13 +24,6 @@ lead.clips([
 ])
 ```
 
-`Note(...)` and raw tuples are interchangeable everywhere notes are accepted:
-
-```python
-lead.clip([Note(60, 0, dur=0.5, vel=0.8)])
-lead.clip([(60, 0, 0.5, 0.8)])              # exactly the same
-```
-
 ## Launcher clips and scenes
 
 ```python
@@ -70,7 +63,7 @@ rev = s.fx_track("REVERB", device="Reverb")   # a return track
 lead.send(0, 0.4)                              # send LEAD into the first return
 ```
 
-## Automation (you build the curves)
+## Automation
 
 Points are `(beat, value)` with `value` normalized `0..1`. Build them with
 ordinary Python.
@@ -90,17 +83,6 @@ import math
 pan = [(b * 0.25, 0.5 + 0.45 * math.sin(b * 0.4)) for b in range(64)]
 synth.automate("pan", pan)
 ```
-
-## Modulators
-
-```python
-synth.add_modulator("Beat LFO")          # insert a modulator (LFO, ADSR, Steps, ...)
-print(synth.list_modulators())
-synth.map_modulator(0, dest="remote", remote_index=0, amount=0.8)  # wire it to a param
-```
-
-`add_modulator` waits a few seconds for the engine to instantiate the modulator
-before returning, so the following `map_modulator` is safe.
 
 ## Sidechain between tracks
 

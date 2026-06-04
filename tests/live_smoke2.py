@@ -30,12 +30,6 @@ def main():
     bass = s.track("BASS", device="FM-4")
     bass.clip([(33, beat, 0.4, 0.85) for beat in range(s.total)])
 
-    # modulators
-    step("Track.add_modulator", lambda: bass.add_modulator("LFO"))
-    step("Track.list_modulators", lambda: bass.list_modulators())
-    step("Track.map_modulator",
-         lambda: bass.map_modulator(0, "volume"))
-
     # sidechain (KICK -> BASS)
     step("Track.sidechain_from", lambda: bass.sidechain_from(kick))
 

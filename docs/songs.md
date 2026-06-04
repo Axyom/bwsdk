@@ -150,11 +150,14 @@ shk.clips([(192, 64, shaker(16)), (320, 64, shaker(16))])
 snare_t = s.track("SNARE", device="v9 Snare").fx("Reverb", Mix=0.25)
 snare_t.clip([n for end in (64, 128, 192, 256, 320) for n in snare_fill(end)])
 
-# BASS - Beat-LFO on the filter + build sweep + sidechain duck + ghost notes
+# BASS - computed filter LFO + build sweep + sidechain duck + ghost notes
 bass_t = s.track("BASS", device="FM-4").fx("Filter")
-bass_t.add_modulator("Beat LFO")
-bass_t.map_modulator(0, dest="remote", remote_index=0, amount=0.35)   # LFO -> cutoff
-bass_t.automate("remote", ramp(64, 128, 0.20, 0.72), remote_index=0)  # filter opens
+# filter cutoff: opens up through the build, then wobbles - an LFO you compute
+fcut = []
+for beat in range(64, 384):
+    base = 0.25 + 0.45 * min(1.0, (beat - 64) / 64.0)
+    fcut.append((beat, max(0.05, min(1.0, base + 0.12 * math.sin(beat * 0.8)))))
+bass_t.automate("remote", fcut, remote_index=0)
 bass_t.clips([
     (64, 64, bassline(16, A1, vel=0.7)),
     (128, 64, bassline(16, A1, pattern="rolling")),
@@ -174,11 +177,8 @@ stab_t.clips([
     (320, 64, stabs(16, PROG_A)),
 ])
 
-# PAD - long chords + auto-pan + its own LFO
+# PAD - long chords + auto-pan
 pad_t = s.track("PAD", device="Polysynth").fx("Reverb", Mix=0.5).fx("Delay+", Mix=0.25)
-pad_t.select_device(0)                          # back to the Polysynth
-pad_t.add_modulator("Beat LFO")
-pad_t.map_modulator(0, dest="remote", remote_index=0, amount=0.25)
 pad_t.clips([
     (0, 64, held(16, 45)),
     (256, 64, held(16, 41, voicing=(0, 5, 7, 12))),

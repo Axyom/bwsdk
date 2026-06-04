@@ -51,9 +51,8 @@ s = Song(tempo=128, bars=16, clean=True)
 
 Most `Track` methods mutate and return `self`, so they chain
 (`track.fx(...).clip(...)`). The query methods - `describe_clip`,
-`remote_pages`, `list_modulators`, `routing_info`, `map_modulator`,
-`set_clip_prop`, `open_modulator_browser` - return data instead, so call them
-at the end of a chain, not in the middle.
+`remote_pages`, `routing_info`, `set_clip_prop` - return data instead, so call
+them at the end of a chain, not in the middle.
 
 ### Channel strip
 
@@ -104,12 +103,9 @@ at the end of a chain, not in the middle.
 |---|---|
 | `t.automate(param, points, remote_index)` | Offline automation. `param`: `"volume"` / `"pan"` / `"remote"`. `points`: `[(beat, value), ...]`. |
 
-### Modulators and routing
+### Routing
 
 | Method | Description |
 |---|---|
-| `t.add_modulator(name, x, y)` | Insert a modulator (e.g. `"LFO"`, `"Steps"`, `"ADSR"`). |
-| `t.map_modulator(source_index, dest, remote_index, amount)` | Wire a modulator to `"volume"` / `"pan"` / `"remote"`. |
-| `t.list_modulators()` | List modulation sources on the current device. |
-| `t.sidechain_from(source_track, source_device_index, sink_device_index)` | Wire a sidechain input (e.g. Compressor+ listening to the kick). |
+| `t.sidechain_from(source_track, source_device_index, sink_device_index)` | Wire a sidechain input (e.g. Compressor+ listening to the kick). Wires the currently-selected device; use `sink_device_index` to pick which one. |
 | `t.routing_info()` | Read current routing state (read-only). |

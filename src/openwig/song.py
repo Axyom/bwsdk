@@ -76,7 +76,6 @@ def _find_bitwig_root():
 
 _BITWIG_ROOT = _find_bitwig_root()
 FACTORY   = f"{_BITWIG_ROOT}/Library/devices"
-MODULATORS = f"{_BITWIG_ROOT}/Library/Modulators"
 HOLD = lambda beat, val: (beat, val, 0.0, "hold")
 
 
@@ -335,34 +334,6 @@ class Track:
         self.select()
         return self.s.b.request("device.all_remote_pages")
 
-    # ── modulators ───────────────────────────────────────────────────────────
-    def add_modulator(self, name, *, x=0, y=0):
-        """Insert a Bitwig modulator (LFO/Random/Beat LFO/ADSR/Envelope Follower/
-        Steps/Math/etc.) onto the currently-selected device on this track. `name`
-        matches a .bwmodulator file in the standard library (without extension).
-        Reached via ModulatorGridInsertionPoint + byi_2.r3B(File, ZjS, hha) - the
-        same path Bitwig uses for drag-drop from the browser."""
-        self.select()
-        path = f"{MODULATORS}/{name}.bwmodulator"
-        res = self.s.b.request("modulator.insert", {"path": path, "x": int(x), "y": int(y)})
-        # The insert is fire-and-forget on the document thread; the ENGINE then has to
-        # instantiate the modulator. Mapping it before the engine commits crashes the
-        # audio host, so wait generously here (the document shows the source much
-        # sooner, but the engine needs longer).
-        time.sleep(5.0)
-        return self
-
-    def open_modulator_browser(self):
-        """Pop Bitwig's Insert-Modulator dialog (user picks). Programmatic insert isn't
-        reachable through the public API or the cxu_2 schema today - only preview-session
-        commit exists, which would need multi-step orchestration."""
-        self.select(); return self.s.b.request("modulator.open_browser")
-
-    def list_modulators(self):
-        """List modulation sources on the currently-selected device on this track.
-        Returns [{index, kind}, ...]. Each entry is one source (an LFO output, etc.)."""
-        self.select(); return self.s.b.request("modulator.list_sources")
-
     def sidechain_from(self, source_track, *, source_device_index=0, sink_device_index=None):
         """Wire this track's sidechain-capable device (e.g. Compressor+, Gate+) to
         listen to `source_track`'s signal. `source_device_index` picks which device
@@ -392,16 +363,6 @@ class Track:
         as a getter). To CHANGE routing, use the Bitwig GUI."""
         if self.bank == "effect": return {"note": "effect tracks have fixed routing"}
         return self.s.b.request("track.routing_info", {"index": self.idx})
-
-    def map_modulator(self, source_index, dest="remote", *, remote_index=0, amount=0.5):
-        """Map a modulation source (on the current device) to a destination.
-        dest: 'remote' | 'volume' | 'pan'. amount: -1..1 (signed depth).
-        Routes through cxu_2 set_default_modulation_mapping (3630)."""
-        self.select()
-        return self.s.b.request("modulator.map", {
-            "source_index": int(source_index), "dest": dest,
-            "remote_index": int(remote_index), "amount": float(amount),
-        })
 
     def transpose_cursor(self, semitones):
         """Transpose this track's selected clip by N semitones."""
