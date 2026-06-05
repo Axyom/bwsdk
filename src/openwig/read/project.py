@@ -66,64 +66,92 @@ def _device_chain(b, track_idx, max_devices=12):
 def _diff_device_params(b, out, eps=0.006):
     """Fill each device's `params` with the remote values that DIFFER from the device's
     factory/preset default - so recreate restores only the parameters the user actually
-    changed. Defaults are read by inserting a fresh copy on a throwaway track. Mutates
-    `out` in place; best-effort (skips on any error, always removes the temp track)."""
+    changed. Defaults come from a fresh copy inserted on a throwaway track; while that copy
+    is live, each changed param is VERIFIED restorable (many remote controls are macros with
+    custom/saturating ranges where set_remote(value) does NOT reproduce `value` - those are
+    flagged restorable=False so recreate won't write a wrong value). Mutates `out` in place;
+    best-effort, always removes the temp track."""
     from openwig.recreate import _bitwig_dirs, _build_preset_index, _resolve_device
     from openwig.song import FACTORY
     factory_dir, preset_dirs = _bitwig_dirs()
     preset_idx = _build_preset_index(preset_dirs)
 
+    # group device instances by signature (factory name / preset path) so each fresh copy
+    # is inserted once and reused for every instance of that device.
+    by_sig = {}
+    for t in out.get("tracks", []):
+        for d in t.get("devices", []):
+            if not (d.get("all_remotes")):
+                continue
+            kind, ref = _resolve_device(d.get("name", ""), factory_dir, preset_idx)
+            if kind == "unknown":
+                continue
+            by_sig.setdefault((kind, ref or d.get("name")), {"kind": kind, "ref": ref,
+                              "name": d.get("name", ""), "devices": []})["devices"].append(d)
+    if not by_sig:
+        return
+
     b.request("track.create", {"type": "instrument", "name": "__openwig_baseline__", "index": -1})
     time.sleep(0.6)
     temp_idx = max((t.get("index", -1) for t in b.request("state.snapshot").get("tracks", [])), default=None)
-    cache = {}
     try:
-        for t in out.get("tracks", []):
-            for d in t.get("devices", []):
-                live = d.get("all_remotes") or []
-                if not live:
-                    continue
-                kind, ref = _resolve_device(d.get("name", ""), factory_dir, preset_idx)
-                if kind == "unknown":
-                    continue
-                sig = (kind, ref or d.get("name"))
-                if sig not in cache:
-                    cache[sig] = _read_baseline(b, temp_idx, kind, ref, d.get("name", ""), FACTORY)
-                base = cache[sig]
+        for grp in by_sig.values():
+            b.request("track.select", {"index": temp_idx}); time.sleep(0.3)
+            if grp["kind"] == "preset":
+                b.request("device.insert_preset", {"path": grp["ref"]}); time.sleep(1.3)
+            else:
+                b.request("device.insert_file", {"path": f"{factory_dir}/{grp['name']}.bwdevice"}); time.sleep(1.3)
+            base = {(r["page"], r["index"]): r.get("value") for r in _read_cursor_all_pages(b)}
+            verified = {}                       # (page, index, round(value,4)) -> restorable
+            for d in grp["devices"]:
                 changed, seen = [], set()
-                for r in live:
+                for r in d.get("all_remotes") or []:
                     lv = r.get("value")
                     if not isinstance(lv, (int, float)):
                         continue
                     bv = base.get((r["page"], r["index"]))
                     if bv is None or abs(lv - bv) > eps:
-                        # the same underlying parameter is often exposed on several pages;
-                        # capture it once (same name + value) to avoid redundant restores
-                        key = (r.get("name"), round(lv, 4))
+                        key = (r.get("name"), round(lv, 4))   # dedup param exposed on many pages
                         if key in seen:
                             continue
                         seen.add(key)
-                        changed.append({"page": r["page"], "index": r["index"],
-                                        "name": r.get("name"), "value": lv})
+                        vk = (r["page"], r["index"], round(lv, 4))
+                        if vk not in verified:
+                            verified[vk] = _verify_restore(b, r["page"], r["index"], lv)
+                        changed.append({"page": r["page"], "index": r["index"], "name": r.get("name"),
+                                        "value": lv, "restorable": verified[vk]})
                 d["params"] = changed
+            try: b.request("device.delete"); time.sleep(0.4)
+            except Exception: pass
     finally:
         if temp_idx is not None:
             try: b.request("track.delete", {"index": temp_idx}); time.sleep(0.3)
             except Exception: pass
 
 
-def _read_baseline(b, temp_idx, kind, ref, name, factory_dir):
-    """Insert a fresh copy of a device on the temp track, read its default all-page remote
-    values, then remove it. Returns {(page, index): value}."""
-    b.request("track.select", {"index": temp_idx}); time.sleep(0.3)
-    if kind == "preset":
-        b.request("device.insert_preset", {"path": ref}); time.sleep(1.3)
-    else:
-        b.request("device.insert_file", {"path": f"{factory_dir}/{name}.bwdevice"}); time.sleep(1.3)
-    vals = {(r["page"], r["index"]): r.get("value") for r in _read_cursor_all_pages(b)}
-    try: b.request("device.delete"); time.sleep(0.4)
-    except Exception: pass
-    return vals
+def _stable_remote_value(b, index, settle=0.3, tries=5):
+    """Read a remote param's value, polling until two consecutive reads agree - the snapshot
+    observer lags a set_remote by a step or two, so a single read can be stale."""
+    prev = None
+    for _ in range(tries):
+        time.sleep(settle)
+        d = b.request("state.snapshot").get("device") or {}
+        r = [x for x in d.get("remotes", []) if x.get("index") == index]
+        v = r[0].get("value") if r else None
+        if prev is not None and isinstance(v, (int, float)) and abs(v - prev) < 0.003:
+            return v
+        prev = v
+    return prev
+
+
+def _verify_restore(b, page, index, target, tol=0.02):
+    """True if set_remote(target) actually drives the param to ~target on the (live baseline)
+    cursor device - i.e. this remote is a 1:1 control we can restore through. Many macros are
+    not, so this guards against writing a wrong value."""
+    b.request("device.select_remote_page", {"page": int(page)}); time.sleep(0.25)
+    b.request("device.set_remote", {"index": int(index), "value": float(target)})
+    v = _stable_remote_value(b, index)
+    return isinstance(v, (int, float)) and abs(v - target) < tol
 
 
 def read_project(b, with_devices=True, with_clips=False, with_params=True):

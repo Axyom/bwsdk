@@ -208,18 +208,25 @@ def _emit_song_open(data: dict) -> list[str]:
 
 
 def _emit_param_restore(var: str, di: int, dname: str, params: list) -> list[str]:
-    """Restore a device's changed remote params, grouped by page, by index."""
+    """Restore a device's changed remote params (grouped by page, by index). Params whose
+    remote is a non-1:1 macro (restorable=False) can't be reproduced by set_remote, so they
+    are emitted as a comment to set manually rather than written as a wrong value."""
     if not params:
         return []
-    by_page: dict = {}
-    for p in params:
-        by_page.setdefault(p.get("page", 0), []).append(p)
+    restorable = [p for p in params if p.get("restorable", True)]
+    skipped = [p for p in params if not p.get("restorable", True)]
     out = [f"{var}.select_device({di})   # {dname}"]
+    by_page: dict = {}
+    for p in restorable:
+        by_page.setdefault(p.get("page", 0), []).append(p)
     for pg in sorted(by_page):
         ps = sorted(by_page[pg], key=lambda x: x.get("index", 0))
         entries = ", ".join(f"{p.get('index')}: {_fmt_float(p.get('value'))}" for p in ps)
         names = ", ".join(str(p.get("name")) for p in ps)
         out.append(f"{var}.set_remote_values({pg}, {{{entries}}})   # {names}")
+    for p in skipped:
+        out.append(f"#   set {p.get('name')!r} = {_fmt_float(p.get('value'))} manually "
+                   f"(remote is a non-1:1 macro - can't restore via set_remote)")
     return out
 
 
