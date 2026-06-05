@@ -910,6 +910,29 @@ var HANDLERS = {
     "obj.walk_result": function (p) {
         return { json: gWalk, error: gWalkErr, ready: (gWalk != null || gWalkErr != null) };
     },
+    // Like obj.walk but rooted at the CURRENT cursor DEVICE - to read one device's document
+    // subtree (real parameter atoms + values, with no remote-macro indirection and no
+    // observer lag). Same safe descriptor walk; fetch with obj.walk_result.
+    "obj.walk_device": function (p) {
+        gWalk = null; gWalkErr = null;
+        var maxDepth = Math.min(bget(p, "max_depth", 12) | 0, 16);
+        var maxNodes = Math.min(bget(p, "max_nodes", 6000) | 0, 9000);
+        var pruneArr = bget(p, "prune", []), prune = {};
+        for (var pi = 0; pi < pruneArr.length; pi++) prune["" + pruneArr[pi]] = true;
+        var noDedupArr = bget(p, "no_dedup", []), noDedup = {};
+        for (var ni = 0; ni < noDedupArr.length; ni++) noDedup["" + noDedupArr[ni]] = true;
+        var opts = { prune: prune, noFilter: !!bget(p, "no_filter", false), seen: {}, noDedup: noDedup };
+        _runOnDocumentThread(cursorTrack, function () {
+            try {
+                var root = cursorDevice.getDeepestTarget();
+                if (root == null) { gWalkErr = "no device target (select a device first)"; return { error: gWalkErr }; }
+                var budget = { n: maxNodes };
+                gWalk = JSON.stringify(_walkObj(root, 0, maxDepth, budget, opts));
+                return { len: gWalk.length, used: maxNodes - budget.n };
+            } catch (e) { gWalkErr = "" + e; return { error: gWalkErr }; }
+        });
+        return { queued: true, note: "fetch with obj.walk_result" };
+    },
     // CURRENT cursor device's remote-page params + the identity of each param's
     // document atom(s). Navigate devices from Python (select_previous/next) and
     // call this per device; match the ids against obj.walk automation-lane targets
