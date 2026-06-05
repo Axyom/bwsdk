@@ -480,6 +480,36 @@ function _findAutomationInsert(cls) {
     throw "automation insert method not found";
 }
 
+// Find a parameter value's NORMALIZE function on its document fj: the 1-arg(double)->
+// double method mapping native units to 0..1 (== the inverse of what automate() writes,
+// and what arranger breakpoints must be converted through). Names are obfuscated and
+// class-specific, so identify by behaviour: the unique such method, or - if several -
+// the one that maps the current native value to the current normalized value.
+function _findNormalizeFn(fj, curNative, curNorm) {
+    var cands = [], seen = {}, c = fj.getClass();
+    while (c != null) {
+        var ms = c.getDeclaredMethods();
+        for (var i = 0; i < ms.length; i++) {
+            var m = ms[i];
+            if (m.getParameterCount() !== 1) continue;
+            if (("" + m.getReturnType().getName()) !== "double") continue;
+            if (("" + m.getParameterTypes()[0].getName()) !== "double") continue;
+            var nm = "" + m.getName(); if (seen[nm]) continue; seen[nm] = 1;
+            m.setAccessible(true); cands.push(m);
+        }
+        c = c.getSuperclass();
+    }
+    if (cands.length === 0) return null;
+    if (cands.length === 1) return cands[0];
+    for (var j = 0; j < cands.length; j++) {
+        try {
+            var got = cands[j].invoke(fj, java.lang.Double.valueOf(curNative));
+            if (got != null && Math.abs(got - curNorm) < 1e-3 && got >= -0.01 && got <= 1.01) return cands[j];
+        } catch (e) {}
+    }
+    return null;
+}
+
 // ── generic descriptor-graph reader (the in-process structured reader) ──────────
 // Walk the live document object graph EXACTLY the way Bitwig's own serializer does:
 // for each property descriptor that passes (nI_() && SZo.uEK filter) emit its VALUE
@@ -905,21 +935,34 @@ var HANDLERS = {
         }
         return { params: params };
     },
-    // CURRENT cursor device's remote-page params with their RAW (native) value -
-    // the same scale arranger automation breakpoints store (decimal_value_event 655).
-    // Used to calibrate native<->normalized: set a param to 0 and 1, read raw at each,
-    // and the (off, slope) affine maps native breakpoint values back to automate()'s 0..1.
-    "device.remote_raw": function (p) {
-        var params = [];
-        for (var ri = 0; ri < NUM_REMOTE; ri++) {
-            var pr = remoteControlsPage.getParameter(ri);
-            var ex; try { ex = !!pr.exists().get(); } catch (e) { ex = false; }
-            if (!ex) continue;
-            var raw = null;
-            try { raw = pr.value().getRaw(); } catch (e) {}
-            params.push({ index: ri, raw: raw });
+    // Convert arranger-automation breakpoint values (native/raw units, decimal_value_event
+    // 655) to automate()'s normalized 0..1 for the given remote param, using Bitwig's OWN
+    // normalize function on the param's document fj. This is exact for any mapping - including
+    // remotes whose macro covers only a sub-range of the param, and nonlinear (log) params -
+    // because it operates on the underlying parameter's full range, not the remote macro.
+    // Non-destructive: reads only. p: { remote_index, values: [native, ...] }.
+    "device.remote_normalize": function (p) {
+        var ri = bget(p, "remote_index", 0) | 0;
+        var vals = p.values || [];
+        var pp = remoteControlsPage.getParameter(ri);
+        var dt = null, atom = null, fj = null;
+        try { dt = pp.getDeepestTarget(); } catch (e) {}
+        try { atom = _invokeNoArg(dt, "getAtom"); } catch (e) {}
+        fj = _fjFrom(atom); if (fj == null) fj = _fjFrom(dt);
+        if (fj == null) return { error: "no fj" };
+        var curNative, curNorm;
+        try { curNative = pp.value().getRaw(); } catch (e) { return { error: "no getRaw" }; }
+        try { curNorm = pp.value().get(); } catch (e) { return { error: "no value" }; }
+        var nf = _findNormalizeFn(fj, curNative, curNorm);
+        if (nf == null) return { error: "no normalize fn", cur_native: curNative, cur_norm: curNorm };
+        var out = [];
+        for (var i = 0; i < vals.length; i++) {
+            try {
+                var n = nf.invoke(fj, java.lang.Double.valueOf(vals[i]));
+                out.push(n < 0 ? 0 : (n > 1 ? 1 : n));
+            } catch (e) { out.push(null); }
         }
-        return { params: params };
+        return { normalized: out };
     },
     // read the focused arranger clip's MIDI notes via the note-step grid (scroll-aware).
     // protocol: notes_setup -> notes_scroll(step) per window -> notes_get. grid is 16 steps wide.

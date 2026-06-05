@@ -23,9 +23,9 @@ any other openwig script to reconstruct the project.
 - **Arranger automation** - volume/pan lanes, and device-parameter lanes with their
   **target resolved** (it figures out which device + `remote_index` each lane drives,
   via object-id matching) and emits `select_device(i)` + `automate('remote', ..., remote_index=N)`.
-  Note: breakpoint **values are read in each parameter's native units** (e.g. a filter
-  cutoff in Hz), so the target and curve shape are faithful but the absolute values of
-  non-normalized params may need scaling
+  Breakpoint values are **converted to normalized 0..1 using Bitwig's own normalize
+  function**, so values round-trip exactly - even for remotes whose macro covers only a
+  sub-range of the parameter, and for nonlinear (e.g. logarithmic filter-cutoff) params
 - **Effect/return tracks**
 
 ## What it does not capture (read-API gaps)

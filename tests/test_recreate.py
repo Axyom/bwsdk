@@ -81,17 +81,18 @@ def test_automation_pan_normalized():
     assert ".automate('pan', [(0, 0), (4, 1)])" in to_script(data)
 
 
-def test_automation_remote_calibrated():
-    # a calibrated remote target: off=15, scale=85 (e.g. a Hz param) -> norm = (raw-15)/85
+def test_automation_remote_normalized():
+    # a normalized remote target: each breakpoint carries its precomputed `nvalue`
+    # (Bitwig's normalize fn), so recreate emits those directly
     data = {"tempo": 120, "tracks": [{
         "index": 0, "name": "T", "volume": 0.8,
         "devices": [{"name": "Polysynth", "remotes": []}, {"name": "Delay-1", "remotes": []}],
         "clips": [],
         "automation": [{"param": "decimal_value_atom",
-                        "breakpoints": [{"time": 0, "value": 15.0}, {"time": 4, "value": 100.0}],
+                        "breakpoints": [{"time": 0, "value": 15.0, "nvalue": 0.0},
+                                        {"time": 4, "value": 100.0, "nvalue": 1.0}],
                         "target": {"kind": "remote", "device_index": 1, "remote_index": 4,
-                                   "device": "Delay-1", "param": "Low",
-                                   "value_off": 15.0, "value_scale": 85.0}}],
+                                   "device": "Delay-1", "param": "Low", "normalized": True}}],
     }], "effect_tracks": []}
     s = to_script(data)
     assert ".automate('remote', [(0, 0), (4, 1)], remote_index=4)" in s

@@ -147,6 +147,12 @@ def _norm_bps(bps, off, scale):
     return ", ".join(out)
 
 
+def _nvalue_bps(bps):
+    """Format breakpoints using each breakpoint's precomputed normalized `nvalue`
+    (set by read.notes.normalize_remote_lanes via Bitwig's own normalize fn)."""
+    return ", ".join(f"({_fmt_float(b.get('time'))}, {_fmt_float(b.get('nvalue'))})" for b in bps[:512])
+
+
 def _pan_to_signed(p):
     """Snapshot pan is 0..1 (0 = full left, 0.5 = center). Track.pan takes -1..+1."""
     try:
@@ -286,12 +292,11 @@ def _emit_track(t: dict, var: str, factory_dir=None, preset_idx=None) -> list[st
             lines.append(f"{var}.automate('pan', [{_norm_bps(bps, _PAN_OFF, _PAN_SCALE)}])")
         elif kind == "remote":
             di, ri = tgt.get("device_index", 0), tgt.get("remote_index", 0)
-            off, scale = tgt.get("value_off"), tgt.get("value_scale")
             lines.append(f"{var}.select_device({di})   # {tgt.get('device', '')}: {tgt.get('param', '')}")
-            if scale:
-                lines.append(f"{var}.automate('remote', [{_norm_bps(bps, off, scale)}], remote_index={ri})")
+            if tgt.get("normalized") and all(isinstance(b.get("nvalue"), (int, float)) for b in bps):
+                lines.append(f"{var}.automate('remote', [{_nvalue_bps(bps)}], remote_index={ri})")
             else:
-                # target resolved but not calibrated (no live Bitwig at read time):
+                # target resolved but not normalized (no live Bitwig at read time):
                 # values are RAW/native - they may need scaling to 0..1.
                 lines.append(f"# (uncalibrated - values are raw/native, may need scaling to 0..1)")
                 lines.append(f"{var}.automate('remote', [{_norm_bps(bps, 0, None)}], remote_index={ri})")
