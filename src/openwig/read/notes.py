@@ -218,9 +218,10 @@ def collect_automation(node, out=None):
 
 
 def read_device_atom_map(bridge, idx, max_devices=16):
-    """Map each device-remote-param's document-atom id -> (device_index, remote_index,
-    device_name, param_name) for the track's device chain. Navigates the cursor device
-    (page 0 of each device's remote controls)."""
+    """Map each device-remote-param's document-atom id -> (device_index, page, remote_index,
+    device_name, param_name) for the track's device chain, across ALL remote-control pages
+    (an automated parameter may be mapped on a page other than the default one). Selecting a
+    page is async, so it's done one page at a time with a settle, not inside the handler."""
     bridge.request("track.select", {"index": idx}); time.sleep(0.3)
     for _ in range(max_devices):
         try: bridge.request("device.select_previous")
@@ -234,10 +235,15 @@ def read_device_atom_map(bridge, idx, max_devices=16):
         nm = d.get("name")
         if nm == last and amap:
             break
-        rr = bridge.request("device.remote_atom_ids") or {}
-        for pm in rr.get("params", []):
-            for aid in pm.get("atom_ids", []):
-                amap.setdefault(aid, (di, pm.get("remote_index"), nm, pm.get("name", "")))
+        pages = bridge.request("device.all_remote_pages") or []
+        npages = len(pages) if pages else 1
+        for pgi in range(npages):
+            bridge.request("device.select_remote_page", {"page": pgi}); time.sleep(0.12)
+            rr = bridge.request("device.remote_atom_ids") or {}
+            for pm in rr.get("params", []):
+                for aid in pm.get("atom_ids", []):
+                    amap.setdefault(aid, (di, pgi, pm.get("remote_index"), nm, pm.get("name", "")))
+        bridge.request("device.select_remote_page", {"page": 0}); time.sleep(0.05)
         last = nm
         bridge.request("device.select_next"); time.sleep(0.1)
     return amap
@@ -264,6 +270,8 @@ def normalize_remote_lanes(bridge, idx, autos):
         for a in by_dev[di]:
             bps = a.get("breakpoints") or []
             ri = a["target"]["remote_index"]
+            pg = a["target"].get("page", 0) or 0
+            bridge.request("device.select_remote_page", {"page": int(pg)}); time.sleep(0.15)
             resp = bridge.request("device.remote_normalize",
                                   {"remote_index": int(ri), "values": [b.get("value") for b in bps]}) or {}
             norm = resp.get("normalized")
@@ -289,8 +297,9 @@ def read_track(bridge, idx):
             a["target"] = {"kind": "pan"}
         else:
             hit = next((amap[r] for r in a.get("ref_ids", []) if r in amap), None)
-            a["target"] = ({"kind": "remote", "device_index": hit[0], "remote_index": hit[1],
-                            "device": hit[2], "param": hit[3]} if hit else {"kind": "unknown"})
+            a["target"] = ({"kind": "remote", "device_index": hit[0], "page": hit[1],
+                            "remote_index": hit[2], "device": hit[3], "param": hit[4]}
+                           if hit else {"kind": "unknown"})
         a.pop("ref_ids", None)
     # convert resolved remote lanes' breakpoint values native -> normalized (the walk
     # reads raw units; automate() needs 0..1) via Bitwig's own normalize function

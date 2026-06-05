@@ -346,6 +346,12 @@ class Track:
         self.select()
         return self.s.b.request("device.all_remote_pages")
 
+    def select_remote_page(self, page):
+        """Select the Nth remote-controls page of the cursor device (0 = first).
+        Select the device first; `remote_index` in automate()/set_remotes refers to
+        the page selected here."""
+        self.s.b.request("device.select_remote_page", {"page": int(page)}); time.sleep(0.15); return self
+
     def sidechain_from(self, source_track, *, source_device_index=0, sink_device_index=None):
         """Wire this track's sidechain-capable device (e.g. Compressor+, Gate+) to
         listen to `source_track`'s signal. `source_device_index` picks which device
@@ -393,13 +399,17 @@ class Track:
         self.s.b.request(self._ns("set_volume"), {"index": self.idx, "value": v})
         time.sleep(0.03); return self
 
-    def automate(self, param, points, remote_index=0):
+    def automate(self, param, points, remote_index=0, page=None):
         """Offline automation. param: 'volume' | 'pan' | 'remote'. points: [(beat, val0..1
-        [, curvature, 'linear'|'hold']), ...]."""
+        [, curvature, 'linear'|'hold']), ...]. For 'remote', `remote_index` is the slot on
+        the device's CURRENT remote page; pass `page` to target a non-default page (select
+        the device first)."""
         self.select()
+        if page is not None:
+            self.s.b.request("device.select_remote_page", {"page": int(page)}); time.sleep(0.1)
         wa.write_offline(self.s.b, [list(p) for p in points], param=param, remote_index=remote_index)
         self._auto_spec.append({"param": param, "points": [list(p) for p in points],
-                                "remote_index": remote_index})
+                                "remote_index": remote_index, "page": page})
         return self
 
 

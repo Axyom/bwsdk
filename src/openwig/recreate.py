@@ -292,9 +292,11 @@ def _emit_track(t: dict, var: str, factory_dir=None, preset_idx=None) -> list[st
             lines.append(f"{var}.automate('pan', [{_norm_bps(bps, _PAN_OFF, _PAN_SCALE)}])")
         elif kind == "remote":
             di, ri = tgt.get("device_index", 0), tgt.get("remote_index", 0)
+            pg = tgt.get("page", 0) or 0
+            page_kw = f", page={pg}" if pg else ""
             lines.append(f"{var}.select_device({di})   # {tgt.get('device', '')}: {tgt.get('param', '')}")
             if tgt.get("normalized") and all(isinstance(b.get("nvalue"), (int, float)) for b in bps):
-                lines.append(f"{var}.automate('remote', [{_nvalue_bps(bps)}], remote_index={ri})")
+                lines.append(f"{var}.automate('remote', [{_nvalue_bps(bps)}], remote_index={ri}{page_kw})")
             else:
                 # target resolved but not normalized (no live Bitwig at read time):
                 # values are RAW/native - they may need scaling to 0..1.
