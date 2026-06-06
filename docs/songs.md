@@ -1,6 +1,6 @@
 # Songs
 
-A full track built entirely in Python with openwig - a single script you run
+A full track built entirely in Python with openwig: a single script you run
 against a clean Bitwig project.
 
 ## Nightdrive
