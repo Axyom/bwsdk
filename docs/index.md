@@ -13,12 +13,11 @@ from openwig import Song, Note
 s = Song(tempo=128, bars=4, clean=True)
 
 kick = s.track("KICK", device="v9 Kick")
-kick.fx("Saturator", Drive=0.20)
 kick.clip([Note(36, beat, dur=0.25) for beat in range(16)])             # four-on-the-floor
 
-bass = s.track("BASS", device="FM-4")
+bass = s.track("BASS", device="Polysynth")
 bass.fx("Filter")
-bass.clip([Note(33, beat + 0.5, dur=0.4, vel=0.85) for beat in range(16)])  # offbeat root
+bass.clip([Note(33, beat+0.5, dur=0.4, vel=0.85) for beat in range(16)])  # offbeat root
 
 s.master(["EQ+", "Compressor+", "Peak Limiter"])
 s.play()
