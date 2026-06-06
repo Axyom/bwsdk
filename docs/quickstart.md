@@ -26,12 +26,12 @@ spanning the song. You should hear a kick looping at 128 BPM.
 ## 2. Add a bass
 
 ```python
-bass = s.track("BASS", device="FM-4")
+bass = s.track("BASS", device="Polysynth")
 bass.fx("Filter")
 bass.clip([Note(33, beat + 0.5, dur=0.4, vel=0.85) for beat in range(16)])
 ```
 
-`.fx("Filter")` chains the Filter device after FM-4. `beat + 0.5` puts the bass
+`.fx("Filter")` chains the Filter device after Polysynth. `beat + 0.5` puts the bass
 on the off-beat, and `vel=0.85` keeps it a touch quieter than the kick.
 
 ## 3. Closed hats on the off-beats
@@ -77,7 +77,7 @@ s = Song(tempo=128, bars=4, clean=True)
 kick = s.track("KICK", device="v9 Kick")
 kick.clip([Note(36, beat, dur=0.25) for beat in range(16)])
 
-bass = s.track("BASS", device="FM-4")
+bass = s.track("BASS", device="Polysynth")
 bass.fx("Filter")
 bass.clip([Note(33, beat+0.5, dur=0.4, vel=0.85) for beat in range(16)])
 
