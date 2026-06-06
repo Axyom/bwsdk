@@ -163,6 +163,37 @@ class BridgeClient:
             time.sleep(rest)
         return res
 
+    def _device_count(self):
+        """Loaded-device count on the cursor track, or None on an older controller."""
+        try:
+            r = self.request("track.device_count", timeout=2.0)
+        except BridgeError:
+            return None
+        return r.get("count") if isinstance(r, dict) else r
+
+    def request_insert(self, method, params=None, *, fallback=1.0, floor=0.15, timeout=8.0, poll=0.04):
+        """Fire a device insert and wait until the device finishes loading (the cursor track's
+        device count goes up) instead of sleeping a fixed second. Device loading happens in
+        Bitwig's engine - NOT a GraalJS document-thread op - so polling track.device_count
+        here is safe (no concurrent JS). Falls back to sleeping `fallback` on older
+        controllers that don't expose the count."""
+        base = self._device_count()
+        t0 = time.time()
+        res = self.request(method, params)
+        if base is None:
+            time.sleep(fallback)
+            return res
+        deadline = t0 + timeout
+        while time.time() < deadline:
+            d = self._device_count()
+            if isinstance(d, (int, float)) and d > base:
+                break
+            time.sleep(poll)
+        rest = floor - (time.time() - t0)        # breathing room
+        if rest > 0:
+            time.sleep(rest)
+        return res
+
     def host_version(self):
         """Return the live Bitwig Studio version string (e.g. ``"6.0.6"``)."""
         info = self.request("host.version")

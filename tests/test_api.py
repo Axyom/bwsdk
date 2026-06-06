@@ -45,6 +45,10 @@ class FakeBridge:
         """Async-op fire+wait collapses to a plain recorded request in tests."""
         return self.request(method, params)
 
+    def request_insert(self, method, params=None, **_kw):
+        """Device-insert fire+wait collapses to a plain recorded request in tests."""
+        return self.request(method, params)
+
     # --- assertion helpers ---
     def methods(self):
         return [m for m, _ in self.calls]

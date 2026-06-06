@@ -170,13 +170,13 @@ class Track:
     # ── devices / fx ──────────────────────────────────────────────────────────
     def add_device(self, name):
         self.select()
-        self.s.b.request("device.insert_file", {"path": FACTORY + "/" + name + ".bwdevice"}); time.sleep(1.0)
+        self.s.b.request_insert("device.insert_file", {"path": FACTORY + "/" + name + ".bwdevice"}, fallback=1.0)
         if self._device_name is None: self._device_name = name
         return self
 
     def add_bitwig(self, uuid):
         self.select()
-        self.s.b.request("device.insert_bitwig", {"uuid": uuid}); time.sleep(1.2)
+        self.s.b.request_insert("device.insert_bitwig", {"uuid": uuid}, fallback=1.2)
         if self._device_uuid is None: self._device_uuid = uuid
         return self
 
@@ -318,8 +318,8 @@ class Track:
     def preset(self, path):
         """Load a .bwpreset file onto this track (replaces device chain)."""
         self.select()
-        self.s.b.request("device.insert_preset", {"path": str(path)})
-        time.sleep(1.0); return self
+        self.s.b.request_insert("device.insert_preset", {"path": str(path)}, fallback=1.0)
+        return self
 
     def step_attr(self, x, key, attr, value):
         """Set a NoteStep attribute on the currently-selected clip's note at (x, key).

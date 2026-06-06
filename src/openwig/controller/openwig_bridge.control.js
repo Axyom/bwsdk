@@ -40,7 +40,7 @@ var NUM_CUES    = 16;
 // ── globals ─────────────────────────────────────────────────────────────────
 
 var transport, trackBank, effectTrackBank, masterTrack, sceneBank;
-var cursorTrack, cursorDevice, remoteControlsPage;
+var cursorTrack, cursorDevice, remoteControlsPage, cursorTrackDeviceBank;
 var masterCursorDevice, masterRemotes, masterDeviceBank;
 var gSerializeB64 = null, gSerializeErr = null;
 var gWalk = null, gWalkErr = null;           // generic descriptor-graph reader result (JSON string)
@@ -140,6 +140,10 @@ function init() {
         masterDeviceBank.getItemAt(_md).exists().markInterested();
         masterDeviceBank.getItemAt(_md).name().markInterested();
     }
+    // cursor-track device chain - lets track.device_count report how many devices are
+    // loaded, so the SDK can wait for an insert to finish loading instead of a fixed sleep.
+    cursorTrackDeviceBank = cursorTrack.createDeviceBank(16);
+    for (var _cd = 0; _cd < 16; _cd++) cursorTrackDeviceBank.getItemAt(_cd).exists().markInterested();
     // send/effect (return) tracks live in a SEPARATE bank from the main track bank -> need
     // their own bank so project.clear can delete them too.
     try {
@@ -707,6 +711,15 @@ var HANDLERS = {
     // The SDK reads it before firing an op and polls until it advances - replaces fixed
     // sleeps with "wait until the op actually finished" (faster + race-free).
     "ops.done": function () { return { done: gOpsDone }; },
+    // Number of loaded devices on the CURSOR track. A device insert finishes loading
+    // asynchronously (not a document-thread op, so no op_done) - the SDK polls this until it
+    // increases instead of sleeping a fixed second. Polling here is safe: loading runs in
+    // Bitwig's engine, not the GraalJS controller, so there's no concurrent JS.
+    "track.device_count": function () {
+        var n = 0;
+        for (var i = 0; i < 16; i++) { try { if (cursorTrackDeviceBank.getItemAt(i).exists().get()) n++; } catch (e) {} }
+        return { count: n };
+    },
     "hello": function (p) { return { version: 1, num_tracks: NUM_TRACKS, snapshot: snapshot() }; },
     "state.snapshot": function () { return snapshot(); },
     // ── host introspection (Bitwig version handshake) ──
