@@ -82,9 +82,48 @@ def uninstall_controller(*, dry_run: bool = False) -> int:
     return 0
 
 
+def _print_selftest(rep) -> int:
+    """Print the resolver self-test capability matrix; return the rc contribution."""
+    if not rep.get("connected"):
+        print("internals      : (bridge dropped during self-test)")
+        return 2
+
+    classes = rep.get("classes") or {}
+    nload = sum(1 for v in classes.values() if v)
+    missing = [k for k, v in classes.items() if not v]
+    line = f"  classes      : {nload}/{len(classes)} internal classes load"
+    if missing:
+        line += "   MISSING: " + ", ".join(missing)
+    print(line)
+
+    caps = rep.get("capabilities")
+    if not caps:
+        print(f"  round-trip   : NOT RUN ({rep.get('error', 'unknown')})")
+        return 3
+
+    rc = 0
+    for key, label in (("automation_write", "automation  "),
+                       ("clip_create", "clip create "),
+                       ("descriptor_read", "descriptor  ")):
+        c = caps.get(key) or {}
+        ok = c.get("ok")
+        print(f"  {label} : {'OK  ' if ok else 'FAIL'}  ({c.get('detail', '')})")
+        if not ok:
+            rc = max(rc, 3)
+
+    if rep.get("ok"):
+        print("  => all reflection paths verified on this Bitwig build")
+    else:
+        print("  => SOME paths failed - this Bitwig build may be unsupported.")
+        print("     Please report at https://github.com/Axyom/openwig/issues with the lines above.")
+    return rc
+
+
 def doctor() -> int:
-    """Print install + bridge + Bitwig-version diagnostics. Exit non-zero on any failure."""
+    """Print install + bridge + Bitwig-version + reflection self-test diagnostics.
+    Exit non-zero on any failure."""
     from openwig import SUPPORTED_BITWIG_VERSIONS, __version__
+    from openwig.diagnostics import run_selftest
 
     supported_str = ", ".join(f"{v}.x" for v in sorted(SUPPORTED_BITWIG_VERSIONS))
     print(f"openwig {__version__} (supports Bitwig: {supported_str})")
@@ -102,20 +141,29 @@ def doctor() -> int:
 
         b = BridgeClient()
         b.start()
-        if b.wait_connected(2.0):
-            try:
-                snap = b.request("state.snapshot")
-                ver = snap.get("bitwig_version") or snap.get("host_version") or "<unknown>"
-                ok = ver.split(".")[0] in SUPPORTED_BITWIG_VERSIONS
-                print(f"bridge :7777   : OK (Bitwig {ver}) {'compatible' if ok else 'INCOMPATIBLE'}")
-                if not ok:
-                    rc = max(rc, 3)
-            except Exception as exc:  # noqa: BLE001
-                print(f"bridge :7777   : OK (connected) but state.snapshot failed: {exc}")
-                rc = max(rc, 3)
-        else:
+        if not b.wait_connected(2.0):
             print("bridge :7777   : NOT REACHABLE (start Bitwig, then re-run)")
-            rc = max(rc, 2)
+            return max(rc, 2)
+
+        try:
+            ver = b.host_version() or "<unknown>"
+        except Exception:  # noqa: BLE001
+            ver = "<unknown>"
+        ok = ver.split(".")[0] in SUPPORTED_BITWIG_VERSIONS
+        print(f"bridge :7777   : OK (Bitwig {ver}) {'compatible' if ok else 'INCOMPATIBLE'}")
+        if not ok:
+            rc = max(rc, 3)
+
+        # Reflection self-test: prove the internal-access paths actually work on THIS build.
+        # Runs on a throwaway track that is created and deleted here; existing tracks are
+        # never touched.
+        print("internals      : self-test on a throwaway track ...")
+        try:
+            rc = max(rc, _print_selftest(run_selftest(b)))
+        except Exception as exc:  # noqa: BLE001
+            print(f"  self-test    : ERROR ({exc})")
+            rc = max(rc, 3)
+        b.stop()
     except Exception as exc:  # noqa: BLE001
         print(f"bridge :7777   : error ({exc})")
         rc = max(rc, 2)

@@ -44,6 +44,7 @@ var cursorTrack, cursorDevice, remoteControlsPage, cursorTrackDeviceBank;
 var masterCursorDevice, masterRemotes, masterDeviceBank;
 var gSerializeB64 = null, gSerializeErr = null;
 var gWalk = null, gWalkErr = null;           // generic descriptor-graph reader result (JSON string)
+var gProbe = null, gProbeErr = null;         // resolver self-test report (JSON-able object); see resolver.probe
 var gOpsDone = 0;                            // count of finished document-thread ops (completion signal; see ops.done)
 var gClipNotes = {}, gNoteScroll = 0, gNoteStepSize = 0.25;
 var arranger, cueMarkerBank;
@@ -631,6 +632,33 @@ function _runOnDocumentThread(proxy, jsRun) {
     execM.invoke(proxy, task);
 }
 
+// Core arranger-automation insert. MUST be called on the document-edit thread (inside an
+// exec(Runnable)). Unwraps the param proxy to its document fj, builds the a1x identity, and
+// calls the automation_lanes insert by reflection. Extracted so both the public handler and
+// the resolver self-test exercise the SAME path. Returns { inserted, param }.
+function _insertAutomationPoints(byU, paramProxy, which, pts) {
+    var al = _invokeNoArg(byU, "zer");                       // automation_lanes (udG)
+    var pp = paramProxy();
+    var fj = _fjFrom(_invokeNoArg(pp.getDeepestTarget(), "getAtom"));
+    if (fj == null) fj = _fjFrom(pp.getDeepestTarget());
+    if (fj == null) throw "could not resolve fj for param '" + which + "'";
+    var a1x = Java.type("com.bitwig.flt.document.core.master.a1x").r3B(fj);
+    var oJk = Java.type("oJk"), LINEAR = oJk.Xzy, HOLD = oJk.r3B;
+    var Dbl = Java.type("java.lang.Double"), Bl = Java.type("java.lang.Boolean");
+    var m = _findAutomationInsert(al.getClass());
+    var n = 0;
+    for (var i = 0; i < pts.length; i++) {
+        var pt = pts[i];
+        var hasCurv = (pt.length > 2 && pt[2] != null);
+        var curv = hasCurv ? pt[2] : 0.0;
+        var interp = (pt.length > 3 && ("" + pt[3]) === "hold") ? HOLD : LINEAR;
+        m.invoke(al, a1x, Dbl.valueOf(pt[0]), Dbl.valueOf(pt[1]), Dbl.valueOf(curv),
+                 Bl.valueOf(hasCurv), Bl.FALSE, interp, null);
+        n++;
+    }
+    return { inserted: n, param: which };
+}
+
 function automationWriteOffline(p) {
     var pts = p.points; if (!pts || !pts.length) return { error: "no points" };
     var which = "" + bget(p, "param", "volume");
@@ -642,26 +670,7 @@ function automationWriteOffline(p) {
     _runOnDocumentThread(cursorTrack, function () {
         var byU = cursorTrack.getDeepestTarget();
         if (byU == null) throw "no track target (select a track first)";
-        var al = _invokeNoArg(byU, "zer");                       // automation_lanes (udG)
-        var pp = paramProxy();
-        var fj = _fjFrom(_invokeNoArg(pp.getDeepestTarget(), "getAtom"));
-        if (fj == null) fj = _fjFrom(pp.getDeepestTarget());
-        if (fj == null) throw "could not resolve fj for param '" + which + "'";
-        var a1x = Java.type("com.bitwig.flt.document.core.master.a1x").r3B(fj);
-        var oJk = Java.type("oJk"), LINEAR = oJk.Xzy, HOLD = oJk.r3B;
-        var Dbl = Java.type("java.lang.Double"), Bl = Java.type("java.lang.Boolean");
-        var m = _findAutomationInsert(al.getClass());
-        var n = 0;
-        for (var i = 0; i < pts.length; i++) {
-            var pt = pts[i];
-            var hasCurv = (pt.length > 2 && pt[2] != null);
-            var curv = hasCurv ? pt[2] : 0.0;
-            var interp = (pt.length > 3 && ("" + pt[3]) === "hold") ? HOLD : LINEAR;
-            m.invoke(al, a1x, Dbl.valueOf(pt[0]), Dbl.valueOf(pt[1]), Dbl.valueOf(curv),
-                     Bl.valueOf(hasCurv), Bl.FALSE, interp, null);
-            n++;
-        }
-        return { inserted: n, param: which };
+        return _insertAutomationPoints(byU, paramProxy, which, pts);
     });
     return { queued: pts.length, param: which, note: "async; outcome in openwig_bridge.log [auto]" };
 }
@@ -672,41 +681,168 @@ function automationWriteOffline(p) {
 // cxu_2.r3B(UO1, List) (cxu_2.java:82 -> cxr_22.Xzy((XDd)uO1, this.ngq(), list)). Replaces
 // the wire path (mitm_daemon + port 7880) end-to-end. Cursor track must be selected first.
 //   p: { start: beats, duration: beats, notes: [[channel, key, start, dur, vel], ...] }
+// Core arranger-clip create + note fill. MUST run on the document-edit thread. Calls the
+// same GUI commands the wire ops would dispatch, reached via internal command objects.
+// Extracted so the public handler and the resolver self-test share one path.
+// Returns { created, notes, start, duration }.
+function _insertClip(byU, start, dur, notes) {
+    // alU = real class (CFR renamed source file to alu_1.java to avoid case-insensitive
+    // FS collision with sibling classes alu / aLu / aLU - all four exist in default pkg).
+    var X2S = Java.type("X2S"), alu1 = Java.type("alU");
+    var ArrayList = Java.type("java.util.ArrayList");
+    var Dbl = Java.type("java.lang.Double"), Int = Java.type("java.lang.Integer");
+    var args1 = new ArrayList();
+    args1.add(Dbl.valueOf(start)); args1.add(Dbl.valueOf(dur));
+    var clipDoc = X2S.fiU.qgm().r3B(byU, args1);
+    if (clipDoc == null) throw "clip create returned null";
+    var cmdNote = alu1.r3B.XaN();
+    for (var i = 0; i < notes.length; i++) {
+        var n = notes[i];
+        var args2 = new ArrayList();
+        args2.add(Int.valueOf(n[0] | 0));            // channel
+        args2.add(Int.valueOf(n[1] | 0));            // key
+        args2.add(Dbl.valueOf(Number(n[2])));        // start_in_clip
+        args2.add(Dbl.valueOf(Number(n[3])));        // duration
+        args2.add(Dbl.valueOf(Number(n[4])));        // velocity
+        cmdNote.r3B(clipDoc, args2);
+    }
+    return { created: 1, notes: notes.length, start: start, duration: dur };
+}
+
 function _clipCreateAndFill(p) {
     var start = Number(p.start || 0), dur = Number(p.duration || 4);
     var notes = p.notes || [];
     _runOnDocumentThread(cursorTrack, function () {
         var byU = cursorTrack.getDeepestTarget();
         if (byU == null) throw "no track target (select a track first)";
-        // alU = real class (CFR renamed source file to alu_1.java to avoid case-insensitive
-        // FS collision with sibling classes alu / aLu / aLU - all four exist in default pkg).
-        var X2S = Java.type("X2S"), alu1 = Java.type("alU");
-        var ArrayList = Java.type("java.util.ArrayList");
-        var Dbl = Java.type("java.lang.Double"), Int = Java.type("java.lang.Integer");
-        var args1 = new ArrayList();
-        args1.add(Dbl.valueOf(start)); args1.add(Dbl.valueOf(dur));
-        var clipDoc = X2S.fiU.qgm().r3B(byU, args1);
-        if (clipDoc == null) throw "clip create returned null";
-        var cmdNote = alu1.r3B.XaN();
-        for (var i = 0; i < notes.length; i++) {
-            var n = notes[i];
-            var args2 = new ArrayList();
-            args2.add(Int.valueOf(n[0] | 0));            // channel
-            args2.add(Int.valueOf(n[1] | 0));            // key
-            args2.add(Dbl.valueOf(Number(n[2])));        // start_in_clip
-            args2.add(Dbl.valueOf(Number(n[3])));        // duration
-            args2.add(Dbl.valueOf(Number(n[4])));        // velocity
-            cmdNote.r3B(clipDoc, args2);
-        }
-        return { created: 1, notes: notes.length, start: start, duration: dur };
+        return _insertClip(byU, start, dur, notes);
     });
     return { queued: notes.length, start: start, duration: dur, note: "async; outcome in openwig_bridge.log [auto]" };
+}
+
+// ── resolver / self-test (run by `openwig doctor`) ──────────────────────────────
+// The reflection paths above hardcode Bitwig's obfuscated class/method names. Those names
+// are stable for a given Bitwig build but are re-obfuscated each release, so they can move
+// from one version to the next. This self-test VERIFIES, on a throwaway track, that the
+// paths still work on the LIVE build: it round-trips an arranger automation write, an
+// arranger clip+note, and a descriptor read, checking that each landed (distinctive
+// sentinel values must reappear in the descriptor walk). It fails SAFE - a broken path is
+// reported, never silently corrupting a project - and reports which obfuscated classes
+// still load, so an unsupported build yields an actionable report instead of a crash.
+
+function _hostInfo() {
+    var out = {};
+    try { out.product = "" + host.getHostProduct(); } catch (e) {}
+    try { out.vendor  = "" + host.getHostVendor();  } catch (e) {}
+    try { out.version = "" + host.getHostVersion(); } catch (e) {}
+    try { out.api_version = host.getHostApiVersion(); } catch (e) {}
+    return out;
+}
+
+// Every obfuscated class literal the reflection paths load via Java.type. A renamed class
+// here is the cheapest possible breakage signal: the load just throws.
+var _RESOLVER_CLASSES = [
+    "fj",                                          // document automatable-value base
+    "oJk",                                         // automation interpolation enum (LINEAR/HOLD)
+    "com.bitwig.flt.document.core.master.a1x",     // automation value-ref identity: a1x.r3B(fj)
+    "X2S",                                         // arranger clip-create command host
+    "alU",                                         // insert-note command host
+    "com.bitwig.ramona.serial.SZo"                 // serialize filter (descriptor reader)
+];
+function _resolverClasses() {
+    var out = {};
+    for (var i = 0; i < _RESOLVER_CLASSES.length; i++) {
+        var nm = _RESOLVER_CLASSES[i];
+        try { Java.type(nm); out[nm] = true; } catch (e) { out[nm] = false; }
+    }
+    return out;
+}
+
+// sentinels: distinctive constants we write, then look for in the descriptor-walk JSON.
+// NB: automation TIMES (beat positions) and note start/velocity are stored verbatim, so
+// they are searchable; an automation VALUE is stored in a normalized representation and is
+// NOT searchable - hence we verify the automation write by its distinctive TIME.
+var _SENT_AUTO_T = 1.4142135, _SENT_AUTO_T2 = 2.2360679;        // sqrt2, sqrt5 (beat positions)
+var _SENT_NOTE_START = 1.6180339, _SENT_NOTE_VEL = 0.6789, _SENT_NOTE_KEY = 61;
+
+function _walkTrackJSON(byU) {
+    var budget = { n: 9000 };
+    var opts = { prune: {}, noFilter: false, seen: {}, noDedup: {} };
+    return JSON.stringify(_walkObj(byU, 0, 16, budget, opts));
+}
+
+// Runs on the document-edit thread (inside resolver.probe's exec). Mutates ONLY the
+// currently-selected track, which the caller has created as a throwaway and deletes after.
+function _runResolverProbe() {
+    var report = {
+        bitwig: _hostInfo(),
+        classes: _resolverClasses(),
+        capabilities: {
+            automation_write: { ok: false, detail: "" },
+            clip_create:      { ok: false, detail: "" },
+            descriptor_read:  { ok: false, detail: "" }
+        },
+        ok: false
+    };
+    var byU = cursorTrack.getDeepestTarget();
+    if (byU == null) { report.error = "no track target (probe track not selected)"; return report; }
+
+    // 1. arranger automation write (to track volume)
+    try {
+        var r = _insertAutomationPoints(byU, function () { return cursorTrack.volume(); }, "volume",
+            [[_SENT_AUTO_T, 0.3], [_SENT_AUTO_T2, 0.7]]);
+        report.capabilities.automation_write.detail = "inserted " + r.inserted;
+    } catch (e) { report.capabilities.automation_write.detail = "insert failed: " + e; }
+
+    // 2. arranger clip + one note
+    try {
+        var c = _insertClip(byU, 0.0, 4.0, [[0, _SENT_NOTE_KEY, _SENT_NOTE_START, 0.5, _SENT_NOTE_VEL]]);
+        report.capabilities.clip_create.detail = "created clip, " + c.notes + " note(s)";
+    } catch (e) { report.capabilities.clip_create.detail = "create failed: " + e; }
+
+    // 3. descriptor read-back + sentinel verification
+    var json = null;
+    try {
+        json = _walkTrackJSON(byU);
+        report.capabilities.descriptor_read.ok = (json != null && json.length > 2);
+        report.capabilities.descriptor_read.detail = "walk " + (json ? json.length : 0) + " chars";
+    } catch (e) { report.capabilities.descriptor_read.detail = "walk failed: " + e; }
+
+    if (json) {
+        var autoFound = json.indexOf("1.414213") >= 0 || json.indexOf("2.236067") >= 0;
+        if (report.capabilities.automation_write.detail.indexOf("inserted") === 0)
+            report.capabilities.automation_write.ok = autoFound;
+        report.capabilities.automation_write.detail += autoFound ? " | verified" : " | sentinel NOT found";
+
+        var noteFound = json.indexOf("1.618033") >= 0 || json.indexOf("0.6789") >= 0;
+        if (report.capabilities.clip_create.detail.indexOf("created") === 0)
+            report.capabilities.clip_create.ok = noteFound;
+        report.capabilities.clip_create.detail += noteFound ? " | verified" : " | sentinel NOT found";
+    }
+
+    report.ok = report.capabilities.automation_write.ok && report.capabilities.clip_create.ok &&
+                report.capabilities.descriptor_read.ok;
+    return report;
 }
 
 var HANDLERS = {
 
     // ── meta ──
     "ping": function () { return "pong"; },
+    // ── resolver / self-test (driven by `openwig doctor`) ──
+    // Cheap, synchronous: which obfuscated classes still load on this build (no doc thread).
+    "resolver.classes": function () { return { bitwig: _hostInfo(), classes: _resolverClasses() }; },
+    // Full round-trip probe on the document thread; fetch the report with resolver.result.
+    // The caller MUST have created + selected a throwaway track first (this writes to it).
+    "resolver.probe": function (p) {
+        gProbe = null; gProbeErr = null;
+        _runOnDocumentThread(cursorTrack, function () {
+            try { gProbe = _runResolverProbe(); return { ok: gProbe.ok }; }
+            catch (e) { gProbeErr = "" + e; return { error: gProbeErr }; }
+        });
+        return { queued: true, note: "fetch with resolver.result" };
+    },
+    "resolver.result": function () { return { report: gProbe, error: gProbeErr, ready: (gProbe != null || gProbeErr != null) }; },
     // Completion counter for async document-thread ops (clip create, automation write, ...).
     // The SDK reads it before firing an op and polls until it advances - replaces fixed
     // sleeps with "wait until the op actually finished" (faster + race-free).
