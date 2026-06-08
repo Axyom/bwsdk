@@ -4,11 +4,12 @@ The bridge reaches into Bitwig's obfuscated internals to write arranger automati
 create arranger clips, and read the document graph. Those internal class/method names are
 stable for a given Bitwig build but get re-obfuscated each release, so they can move
 between versions. `run_selftest` verifies, on a throwaway track, that each path still works
-on the LIVE build and returns a capability report. `openwig doctor` prints it.
+on the LIVE build, resolves the descriptor-reader names, and (controller side) writes a
+symbol cache the bridge loads at init. `openwig doctor` prints the report.
 
-The probe creates a temporary instrument track named ``__openwig_probe__``, writes to it,
-verifies the writes via a descriptor read, then deletes it. It never modifies your existing
-tracks. It fails safe: a broken path is reported, not silently ignored.
+The probe creates a temporary instrument track, writes to it, verifies the writes via a
+descriptor read, then deletes it. It never modifies your existing tracks. It fails safe: a
+broken path is reported, not silently ignored.
 """
 from __future__ import annotations
 
@@ -19,25 +20,17 @@ from openwig.bridge import BridgeClient, BridgeError
 PROBE_TRACK = "__openwig_probe__"
 
 
-def _find_track_index(b, name):
-    """Index of the track named ``name`` (by name, never by the flaky exists flag)."""
+def _occupied(b):
+    """Set of main-track indices currently occupied (by name; the exists flag is flaky)."""
     snap = b.request("state.snapshot")
-    for t in snap.get("tracks", []):
-        if t.get("name") == name:
-            return t.get("index")
-    return None
+    return {t.get("index") for t in snap.get("tracks", []) if t.get("name")}
 
 
-def _delete_all_named(b, name, limit=6):
-    """Delete every track named ``name`` (self-heals probe tracks left by a crashed run)."""
-    for _ in range(limit):
-        idx = _find_track_index(b, name)
-        if idx is None:
-            return
-        try:
-            b.request("track.delete", {"index": idx})
-        except BridgeError:
-            return
+def _delete_index(b, idx):
+    try:
+        b.request("track.delete", {"index": idx})
+    except BridgeError:
+        pass
 
 
 def run_selftest(b=None, *, timeout=15.0):
@@ -45,7 +38,9 @@ def run_selftest(b=None, *, timeout=15.0):
 
     Returns the report dict from ``resolver.probe`` augmented with a top-level
     ``connected`` flag (and ``classes`` / ``bitwig`` even when the round-trip can't run).
-    Creates and deletes a temporary probe track; never modifies existing tracks.
+    Creates and deletes a temporary probe track; never modifies existing tracks. The probe
+    track is identified by INDEX-DIFF (the new slot that appears), not by name, because the
+    post-create rename can silently fail right after a controller reload.
     """
     own = b is None
     if own:
@@ -59,15 +54,17 @@ def run_selftest(b=None, *, timeout=15.0):
         base = {"connected": True,
                 "classes": classes.get("classes"),
                 "bitwig": classes.get("bitwig")}
+        before = _occupied(b)
+        new_indices = []
         try:
-            _delete_all_named(b, PROBE_TRACK)   # clear any probe track left by a prior crash
             b.request("track.create", {"type": "instrument", "name": PROBE_TRACK})
-            # wait for the track to appear (createInstrumentTrack + a scheduled rename)
+            # wait for a NEW occupied slot to appear (rename may fail, so do not match by name)
             idx = None
             for _ in range(8):
                 time.sleep(0.25)
-                idx = _find_track_index(b, PROBE_TRACK)
-                if idx is not None:
+                new_indices = sorted(_occupied(b) - before)
+                if new_indices:
+                    idx = new_indices[-1]
                     break
             if idx is None:
                 base["error"] = "probe track did not appear (cannot run round-trip)"
@@ -82,8 +79,10 @@ def run_selftest(b=None, *, timeout=15.0):
                 report["error"] = res["error"]
             return report
         finally:
-            # always remove the probe track(s), identifying BY NAME (never index alone)
-            _delete_all_named(b, PROBE_TRACK)
+            # remove every slot that appeared during the probe (covers a failed rename),
+            # deleting from the highest index down so earlier indices stay valid.
+            for idx in sorted(_occupied(b) - before, reverse=True):
+                _delete_index(b, idx)
     finally:
         if own:
             b.stop()

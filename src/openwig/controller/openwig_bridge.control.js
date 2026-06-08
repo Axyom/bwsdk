@@ -47,6 +47,16 @@ var gWalk = null, gWalkErr = null;           // generic descriptor-graph reader 
 var gProbe = null, gProbeErr = null;         // resolver self-test report (JSON-able object); see resolver.probe
 var _AUTO_SYM = null;                         // cached structurally-discovered automation symbols
 var gBlindDiscovery = false;                  // test switch: structural discovery only (no name hints, no fallback)
+// Central obfuscated-symbol table. Defaults are the seed (current-build) names; doctor
+// resolves + validates them and writes a cache, which init loads to overwrite these. The
+// reflection sites read names from here so a re-obfuscated build keeps working once cached.
+var SYM = {
+    // descriptor reader (discovered structurally)
+    mX_: "mX_", KRt: "KRt", bf: "bf", ngq: "ngq", nI_: "nI_", Xzy: "Xzy", uEK: "uEK",
+    // serializer class (leaf obfuscated; package stable)
+    SZo: "com.bitwig.ramona.serial.SZo"
+};
+var gSymSource = "seed";                       // "seed" | "cache" | "discovered"
 var gOpsDone = 0;                            // count of finished document-thread ops (completion signal; see ops.done)
 var gClipNotes = {}, gNoteScroll = 0, gNoteStepSize = 0.25;
 var arranger, cueMarkerBank;
@@ -184,6 +194,9 @@ function init() {
             });
         }
     } catch (e) { host.errorln("noteStepObserver setup: " + e); }
+
+    _loadSymbolCache();          // overwrite SYM reader names from a validated, build-matched cache
+    flog("symbol source: " + gSymSource + "  (fingerprint " + _fingerprint() + ")");
 
     buildState();
     wireObservers();
@@ -531,8 +544,10 @@ function _findNormalizeFn(fj, curNative, curNorm) {
 // cwo_3.KRt() = Arrays.asList(this.azd): the public, collision-free way to get the
 // serialized-property descriptor list (empty if the class wasn't realized yet).
 function _descriptors(cwo) {
-    return _inv0(cwo, "KRt");          // java.util.List<cxz_2>
+    return _inv0(cwo, SYM.KRt);        // java.util.List<cxz_2>
 }
+// uo1.mX_() -> descriptor container, routed through the resolved name.
+function _mx(uo1) { return _invokeNoArg(uo1, SYM.mX_); }
 var _MCACHE = {};
 function _findMethod(cls, name, pcount, p1simple) {
     var key = cls.getName() + "#" + name + "/" + pcount + "/" + (p1simple || "");
@@ -560,13 +575,13 @@ function _inv1(obj, name, a) {                      // cached reflected 1-arg ca
 }
 var _SZUEK = null;
 function _szPass(d, uo1) {                          // Bitwig's own serialize filter (uEK)
-    if (_SZUEK == null) _SZUEK = Java.type("com.bitwig.ramona.serial.SZo").uEK;
-    var m = _findMethod(_SZUEK.getClass(), "r3B", 2, "cxz_2");
+    if (_SZUEK == null) _SZUEK = Java.type(SYM.SZo).uEK;
+    var m = _findMethod(_classOf(_SZUEK), "r3B", 2, "cxz_2");
     if (m == null) return true;
     return !!m.invoke(_SZUEK, d, uo1);
 }
 function _relChildren(d, uo1) {                     // null if d is not a relationship
-    var m = _findMethod(d.getClass(), "uEK", 2, "String");
+    var m = _findMethod(_classOf(d), SYM.uEK, 2, "String");
     if (m == null) return null;
     return m.invoke(d, uo1, null);
 }
@@ -582,8 +597,8 @@ function _jval(v) {
 var _IHC = null;
 function _walkObj(uo1, depth, maxDepth, budget, opts) {
     var o = {}, cwo;
-    try { cwo = uo1.mX_(); } catch (e) { return { _err: "mX_: " + e }; }
-    try { o._cls = "" + _inv0(cwo, "bf"); } catch (e) { o._cls = "?"; }
+    try { cwo = _mx(uo1); } catch (e) { return { _err: "mX_: " + e }; }
+    try { o._cls = "" + _inv0(cwo, SYM.bf); } catch (e) { o._cls = "?"; }
     if (_IHC == null) _IHC = Java.type("java.lang.System");
     var ihc = _IHC.identityHashCode(uo1);
     o._id = ihc;                                        // object identity (for cross-reference matching)
@@ -596,9 +611,9 @@ function _walkObj(uo1, depth, maxDepth, budget, opts) {
     for (var i = 0; i < alen; i++) {
         if (budget.n <= 0) { o._trunc = true; break; }
         var d = azd.get(i);
-        try { if (!_inv0(d, "nI_") || (!opts.noFilter && !_szPass(d, uo1))) continue; }
+        try { if (!_inv0(d, SYM.nI_) || (!opts.noFilter && !_szPass(d, uo1))) continue; }
         catch (e) { if (depth === 0 && !o._ferr) o._ferr = "" + e; continue; }
-        var pid; try { pid = "" + _inv0(d, "ngq"); } catch (e) { pid = "i" + i; }
+        var pid; try { pid = "" + _inv0(d, SYM.ngq); } catch (e) { pid = "i" + i; }
         budget.n--;
         var kids = null;
         try { kids = _relChildren(d, uo1); } catch (e) { kids = null; }
@@ -608,11 +623,11 @@ function _walkObj(uo1, depth, maxDepth, budget, opts) {
                 if (budget.n <= 0) { o._trunc = true; break; }
                 var k = kids.get(j);
                 if (depth < maxDepth) arr.push(_walkObj(k, depth + 1, maxDepth, budget, opts));
-                else { var rc; try { rc = "" + _inv0(k.mX_(), "bf"); } catch (e) { rc = "?"; } arr.push({ _ref: rc }); }
+                else { var rc; try { rc = "" + _inv0(_mx(k), SYM.bf); } catch (e) { rc = "?"; } arr.push({ _ref: rc }); }
             }
             o[pid] = arr;
         } else {
-            try { o[pid] = _jval(_inv1(d, "Xzy", uo1)); } catch (e) { o[pid] = "<err>"; }
+            try { o[pid] = _jval(_inv1(d, SYM.Xzy, uo1)); } catch (e) { o[pid] = "<err>"; }
         }
     }
     return o;
@@ -894,6 +909,237 @@ function _clipCreateAndFill(p) {
     return { queued: notes.length, start: start, duration: dur, note: "async; outcome in openwig_bridge.log [auto]" };
 }
 
+// ── name-free (structural) discovery of the descriptor-reader cluster ───────────
+// The reader walks the document graph via obfuscated methods: uo1.mX_() -> container,
+// container.KRt() -> descriptor list, container.bf() -> class name, and per descriptor
+// ngq() (numeric prop id), nI_() (is-serialized), Xzy(uo1) (scalar value), uEK(uo1,String)
+// (child relationship). We rediscover these by SHAPE + BEHAVIOUR, anchored on a known
+// document object (a track target), so the read path survives re-obfuscation.
+var _JLIST = null;
+function _listClass() { if (_JLIST == null) _JLIST = Java.type("java.util.List").class; return _JLIST; }
+function _isNumericStr(s) {
+    if (s == null) return false; s = "" + s; if (!s.length) return false;
+    for (var i = 0; i < s.length; i++) { var c = s.charCodeAt(i); if (c < 48 || c > 57) return false; }
+    return true;
+}
+// The shape isn't unique, so discovery gathers CANDIDATE name-sets and the caller validates
+// each by execution (walk, look for known sentinels). A candidate carries several Xzy
+// (value-getter) options because the right one can only be told apart behaviourally.
+function _descriptorShape(d0) {
+    var dCls; try { dCls = _classOf(d0); } catch (e) { return null; }
+    var numOpts = [], boolNoArg = [], xzyOpts = [], uEK = null, c = dCls, seen = {};
+    while (c != null) {
+        var ms = c.getDeclaredMethods();
+        for (var i = 0; i < ms.length; i++) {
+            var m = ms[i], nm = "" + m.getName(); if (seen[nm]) continue; seen[nm] = 1;
+            var pc = m.getParameterCount(), rt = m.getReturnType(), rtn = "" + rt.getName();
+            if (pc === 0) {
+                if (rtn === "boolean") boolNoArg.push(nm);
+                else if (rtn === "java.lang.String") numOpts.push({ name: nm, str: true });
+                else if (rtn === "int" || rtn === "long" || rtn === "short") numOpts.push({ name: nm, str: false });
+            } else if (pc === 1 && !rt.isPrimitive() && rt !== java.lang.Void.TYPE && !m.getParameterTypes()[0].isPrimitive()) xzyOpts.push(nm);
+            else if (pc === 2 && ("" + m.getParameterTypes()[1].getSimpleName()) === "String") uEK = nm;
+        }
+        c = c.getSuperclass();
+    }
+    if (uEK == null || !xzyOpts.length) return null;   // ngq not required to validate the skeleton
+    // ngq (prop id) candidates: no-arg methods returning a numeric value (String-numeric or
+    // int/long/short). The exact one is chosen later by value-uniqueness across the container.
+    var ngqOpts = [];
+    for (var k = 0; k < numOpts.length; k++) {
+        try {
+            var v = _invokeNoArg(d0, numOpts[k].name);
+            if (numOpts[k].str) { if (_isNumericStr(v)) ngqOpts.push(numOpts[k].name); }
+            else if (v != null) ngqOpts.push(numOpts[k].name);
+        } catch (e) {}
+    }
+    var nI_ = null;                                   // no-arg boolean (is-serialized): true on serialized props
+    for (var b = 0; b < boolNoArg.length; b++)
+        try { if (_invokeNoArg(d0, boolNoArg[b]) === true) { nI_ = boolNoArg[b]; break; } } catch (e) {}
+    if (nI_ == null && boolNoArg.length) nI_ = boolNoArg[0];
+    return { ngqOpts: ngqOpts, nI_: nI_, uEK: uEK, xzyOpts: xzyOpts };
+}
+// All candidate reader name-sets reachable from uo1 (each carries xzyOpts to be validated).
+function _readerCandidates(uo1) {
+    var out = [], c = _classOf(uo1), seenG = {};
+    while (c != null) {
+        var ms = c.getDeclaredMethods();
+        for (var i = 0; i < ms.length; i++) {
+            var g = ms[i]; if (g.getParameterCount() !== 0) continue;
+            var gn = "" + g.getName(); if (seenG[gn]) continue; seenG[gn] = 1;
+            var rt = g.getReturnType(); if (rt.isPrimitive() || rt === java.lang.Void.TYPE || rt.isArray()) continue;
+            var cwo; try { cwo = _invokeNoArg(uo1, gn); } catch (e) { continue; }
+            if (cwo == null) continue;
+            var cwoCls; try { cwoCls = _classOf(cwo); } catch (e) { continue; }
+            var listM = [], strM = [], cc = cwoCls, seenM = {};
+            while (cc != null) {
+                var ms2 = cc.getDeclaredMethods();
+                for (var j = 0; j < ms2.length; j++) {
+                    var m = ms2[j]; if (m.getParameterCount() !== 0) continue;
+                    var nm = "" + m.getName(); if (seenM[nm]) continue; seenM[nm] = 1;
+                    var r = m.getReturnType();
+                    if (_listClass().isAssignableFrom(r)) listM.push(nm);
+                    else if (("" + r.getName()) === "java.lang.String") strM.push(nm);
+                }
+                cc = cc.getSuperclass();
+            }
+            for (var l = 0; l < listM.length; l++) {
+                var lst; try { lst = _invokeNoArg(cwo, listM[l]); } catch (e) { continue; }
+                if (lst == null) continue;
+                var sz; try { sz = lst.size(); } catch (e) { continue; }
+                if (sz === 0) continue;
+                // the descriptor list is heterogeneous: sample several elements to find a
+                // RICH descriptor (numeric ngq + uEK relationship) that yields the full shape.
+                var sh = null, lim = Math.min(sz, 60);
+                for (var di = 0; di < lim && !sh; di++) {
+                    var dx; try { dx = lst.get(di); } catch (e) { continue; }
+                    if (dx != null) sh = _descriptorShape(dx);
+                }
+                if (!sh) continue;
+                var bf = null;
+                for (var s = 0; s < strM.length; s++)
+                    try { var v = _invokeNoArg(cwo, strM[s]); if (v != null && ("" + v).length && !_isNumericStr(v)) { bf = strM[s]; break; } } catch (e) {}
+                out.push({ mX_: gn, KRt: listM[l], bf: bf, nI_: sh.nI_, uEK: sh.uEK, xzyOpts: sh.xzyOpts, ngqOpts: sh.ngqOpts });
+            }
+        }
+        c = c.getSuperclass();
+    }
+    return out;
+}
+// Bounded recursive walk using a candidate name-set N; pushes scalar values (as strings)
+// into `sink`. Mirrors _walkObj's logic: relationship (uEK non-null) -> recurse; else read Xzy.
+function _walkWith(uo1, N, xzy, depth, maxDepth, budget, sink, seen) {
+    if (budget.n <= 0 || uo1 == null || depth > maxDepth) return;
+    if (_IHC == null) _IHC = Java.type("java.lang.System");
+    var id; try { id = _IHC.identityHashCode(uo1); } catch (e) { id = 0; }
+    if (seen[id]) return; seen[id] = 1;                 // dedup: the document graph has cycles
+    var cwo; try { cwo = _invokeNoArg(uo1, N.mX_); } catch (e) { return; }
+    if (cwo == null) return;
+    var lst; try { lst = _invokeNoArg(cwo, N.KRt); } catch (e) { return; }
+    if (lst == null) return;
+    var sz; try { sz = lst.size(); } catch (e) { return; }
+    for (var i = 0; i < sz && budget.n > 0; i++) {
+        var d; try { d = lst.get(i); } catch (e) { continue; }
+        budget.n--;
+        var kids = null;                                 // relationship children: uEK(uo1, String)
+        try { var km = _findMethod(_classOf(d), N.uEK, 2, "String"); if (km) kids = km.invoke(d, uo1, null); } catch (e) { kids = null; }
+        if (kids != null) {
+            var nk; try { nk = kids.size(); } catch (e) { nk = 0; }
+            for (var k = 0; k < nk && budget.n > 0; k++) {
+                var ch; try { ch = kids.get(k); } catch (e) { continue; }
+                _walkWith(ch, N, xzy, depth + 1, maxDepth, budget, sink, seen);
+            }
+        } else {
+            try { var v = _inv1(d, xzy, uo1); if (v != null) sink.push("" + v); } catch (e) {}
+        }
+    }
+}
+// The prop-id getter (ngq): of the numeric no-arg candidates, the one whose values across
+// the container's descriptors are the most DISTINCT (each property carries a unique id).
+function _selectNgq(cwo, KRt, ngqOpts) {
+    if (!ngqOpts || !ngqOpts.length) return null;
+    var lst; try { lst = _invokeNoArg(cwo, KRt); } catch (e) { return ngqOpts[0]; }
+    if (lst == null) return ngqOpts[0];
+    var sz; try { sz = lst.size(); } catch (e) { return ngqOpts[0]; }
+    var best = ngqOpts[0], bestDistinct = -1;
+    for (var o = 0; o < ngqOpts.length; o++) {
+        var vals = {}, distinct = 0;
+        for (var i = 0; i < sz; i++) {
+            var d; try { d = lst.get(i); } catch (e) { continue; }
+            try { var v = _invokeNoArg(d, ngqOpts[o]); if (v != null && !vals["" + v]) { vals["" + v] = 1; distinct++; } } catch (e) {}
+        }
+        if (distinct > bestDistinct) { bestDistinct = distinct; best = ngqOpts[o]; }
+    }
+    return best;
+}
+// Discover + VALIDATE the reader: pick the candidate whose walk surfaces a known sentinel.
+// Returns { mX_, KRt, bf, ngq, nI_, Xzy, uEK } or null. `sentinels` = substrings to look for.
+function _discoverReader(uo1, sentinels) {
+    // seed (known) names first -> resolves the CANONICAL reader exactly on a supported build.
+    // Skipped in blind mode, which forces the pure structural path (for testing other builds).
+    if (!gBlindDiscovery) {
+        var seedSink = [], seedBud = { n: 9000 };
+        try { _walkWith(uo1, { mX_: "mX_", KRt: "KRt", uEK: "uEK" }, "Xzy", 0, 16, seedBud, seedSink, {}); } catch (e) {}
+        var seedBlob = seedSink.join(""), seedHit = false;
+        for (var ss = 0; ss < sentinels.length; ss++) if (seedBlob.indexOf(sentinels[ss]) >= 0) { seedHit = true; break; }
+        if (seedHit) {
+            var scwo; try { scwo = _invokeNoArg(uo1, "mX_"); } catch (e) { scwo = null; }
+            return { mX_: "mX_", KRt: "KRt", bf: "bf", ngq: scwo ? _selectNgq(scwo, "KRt", ["ngq"]) : "ngq", nI_: "nI_", Xzy: "Xzy", uEK: "uEK" };
+        }
+    }
+    // otherwise (blind, or a build where the seed names changed): first structural candidate
+    // whose walk surfaces a sentinel (validated by execution against the data we just wrote).
+    var cands = _readerCandidates(uo1);
+    for (var ci = 0; ci < cands.length; ci++) {
+        var N = cands[ci];
+        for (var xi = 0; xi < N.xzyOpts.length; xi++) {
+            var xzy = N.xzyOpts[xi], sink = [], budget = { n: 9000 };
+            try { _walkWith(uo1, N, xzy, 0, 16, budget, sink, {}); } catch (e) { continue; }
+            var blob = sink.join("");
+            var hit = false;
+            for (var s = 0; s < sentinels.length; s++) if (blob.indexOf(sentinels[s]) >= 0) { hit = true; break; }
+            if (hit) {
+                var cwoN; try { cwoN = _invokeNoArg(uo1, N.mX_); } catch (e) { cwoN = null; }
+                var ngq = cwoN ? _selectNgq(cwoN, N.KRt, N.ngqOpts) : (N.ngqOpts[0] || null);
+                return { mX_: N.mX_, KRt: N.KRt, bf: N.bf, ngq: ngq, nI_: N.nI_, Xzy: xzy, uEK: N.uEK };
+            }
+        }
+    }
+    return null;
+}
+
+// ── symbol cache: doctor resolves + validates the reader names, persists them keyed by a
+// build fingerprint; the bridge loads them at init. The reader is the one path that cannot
+// self-validate during a plain read (no sentinel to check against), so it relies on the
+// cache; automation/clip resolve + validate live on every write.
+var _CACHE_SCHEMA = 2;
+function _fingerprint() {
+    var parts = [];
+    try { parts.push("v=" + host.getHostVersion()); } catch (e) {}
+    try {
+        var loc = host.getClass().getProtectionDomain().getCodeSource().getLocation();
+        var f = new (Java.type("java.io.File"))(loc.toURI());
+        parts.push("len=" + f.length()); parts.push("mt=" + f.lastModified());
+    } catch (e) { parts.push("nojar"); }
+    parts.push("schema=" + _CACHE_SCHEMA);
+    return parts.join("|");
+}
+function _cachePath() { return ("" + LOG_FILE).replace(/openwig_bridge\.log$/, "symbols_cache.json"); }
+function _writeCache(obj) {
+    try {
+        var BW = Java.type("java.io.BufferedWriter"), FW = Java.type("java.io.FileWriter");
+        var w = new BW(new FW(_cachePath(), false));
+        w.write(JSON.stringify(obj)); w.newLine(); w.flush(); w.close();
+        return true;
+    } catch (e) { flog("symbol cache write failed: " + e); return false; }
+}
+function _readCache() {
+    try {
+        var F = Java.type("java.io.File"), f = new F(_cachePath());
+        if (!f.exists()) return null;
+        var bytes = Java.type("java.nio.file.Files").readAllBytes(f.toPath());
+        return JSON.parse("" + new JString(bytes, Charset.UTF_8));
+    } catch (e) { flog("symbol cache read failed: " + e); return null; }
+}
+// Apply a validated reader name-set into SYM (called from cache load and from the probe).
+function _applyReaderNames(rd) {
+    if (!rd) return;
+    if (rd.mX_) SYM.mX_ = rd.mX_; if (rd.KRt) SYM.KRt = rd.KRt; if (rd.bf) SYM.bf = rd.bf;
+    if (rd.ngq) SYM.ngq = rd.ngq; if (rd.nI_) SYM.nI_ = rd.nI_; if (rd.Xzy) SYM.Xzy = rd.Xzy;
+    if (rd.uEK) SYM.uEK = rd.uEK;
+}
+// init-time load: trust the cache only if its fingerprint matches THIS build.
+function _loadSymbolCache() {
+    var c = _readCache();
+    if (c && c.fingerprint === _fingerprint() && c.reader) {
+        _applyReaderNames(c.reader);
+        if (c.SZo) SYM.SZo = c.SZo;
+        gSymSource = "cache";
+    } else {
+        gSymSource = c ? "seed (cache stale; re-run doctor)" : "seed (no cache; run doctor)";
+    }
+}
+
 // ── resolver / self-test (run by `openwig doctor`) ──────────────────────────────
 // The reflection paths above hardcode Bitwig's obfuscated class/method names. Those names
 // are stable for a given Bitwig build but are re-obfuscated each release, so they can move
@@ -980,6 +1226,13 @@ function _runResolverProbe() {
         report.capabilities.clip_create.detail = "created clip, " + c.notes + " note(s)";
     } catch (e) { report.capabilities.clip_create.detail = "create failed: " + e; }
 
+    // 2.5 discover the descriptor-reader names (validated by the sentinels we just wrote) and
+    //     apply them into SYM, so the descriptor read below exercises the RESOLVED reader.
+    var rd = null;
+    try { rd = _discoverReader(byU, ["1.414213", "2.236067", "1.618033", "0.6789"]); }
+    catch (e) { report.reader_err = "" + e; }
+    if (rd) { _applyReaderNames(rd); report.reader = rd; }
+
     // 3. descriptor read-back + sentinel verification
     var json = null;
     try {
@@ -1040,6 +1293,23 @@ function _runResolverProbe() {
     var caps = report.capabilities;
     report.ok = caps.automation_write.ok && caps.clip_create.ok && caps.descriptor_read.ok &&
                 caps.serialize.ok && caps.normalize.ok;
+
+    // persist the validated reader names so the bridge can use them at read time (no cache in
+    // blind/test mode; only when the reader actually validated via the descriptor read).
+    if (!gBlindDiscovery && rd && caps.descriptor_read.ok) {
+        var cacheObj = {
+            schema: _CACHE_SCHEMA, fingerprint: _fingerprint(), bitwig: report.bitwig,
+            reader: rd, SZo: SYM.SZo,
+            verdicts: { automation: caps.automation_write.ok, clip: caps.clip_create.ok,
+                        descriptor: caps.descriptor_read.ok, serialize: caps.serialize.ok, normalize: caps.normalize.ok }
+        };
+        var wrote = _writeCache(cacheObj);
+        gSymSource = wrote ? "discovered+cached" : "discovered";
+        report.cache = { written: wrote, path: _cachePath(), fingerprint: cacheObj.fingerprint };
+    } else {
+        report.cache = { written: false, reason: gBlindDiscovery ? "blind mode" : (rd ? "descriptor_read failed" : "reader not discovered") };
+    }
+    report.symbol_source = gSymSource;
     return report;
 }
 
@@ -1050,6 +1320,13 @@ var HANDLERS = {
     // ── resolver / self-test (driven by `openwig doctor`) ──
     // Cheap, synchronous: which obfuscated classes still load on this build (no doc thread).
     "resolver.classes": function () { return { bitwig: _hostInfo(), classes: _resolverClasses() }; },
+    // Where SYM's reader names came from this session (cache / seed) + the build fingerprint.
+    "resolver.status": function () {
+        var c = _readCache();
+        return { symbol_source: gSymSource, fingerprint: _fingerprint(),
+                 cache_exists: (c != null), cache_matches: (c != null && c.fingerprint === _fingerprint()),
+                 reader: { mX_: SYM.mX_, KRt: SYM.KRt, bf: SYM.bf, ngq: SYM.ngq, nI_: SYM.nI_, Xzy: SYM.Xzy, uEK: SYM.uEK } };
+    },
     // Full round-trip probe on the document thread; fetch the report with resolver.result.
     // The caller MUST have created + selected a throwaway track first (this writes to it).
     // params: { blind: bool } - blind forces name-free structural discovery only (no name

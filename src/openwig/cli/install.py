@@ -115,8 +115,19 @@ def _print_selftest(rep) -> int:
 
     disc = rep.get("discovered")
     if disc:
-        print(f"  resolved by  : structural discovery "
+        print(f"  automation   : structural discovery "
               f"(al={disc.get('al_accessor')}, insert={disc.get('insert')}, base={disc.get('value_base')})")
+
+    rd = rep.get("reader")
+    if rd:
+        print(f"  reader       : resolved (mX_={rd.get('mX_')}, ngq={rd.get('ngq')}, uEK={rd.get('uEK')})")
+    cache = rep.get("cache") or {}
+    if cache.get("written"):
+        print(f"  cache        : written -> {cache.get('path')}")
+    elif "reason" in cache:
+        print(f"  cache        : not written ({cache.get('reason')})")
+    if rep.get("symbol_source"):
+        print(f"  symbol source: {rep.get('symbol_source')}")
 
     if rep.get("ok"):
         print("  => all reflection paths verified on this Bitwig build")
