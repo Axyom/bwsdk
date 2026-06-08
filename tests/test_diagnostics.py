@@ -1,27 +1,28 @@
-"""Diagnostics tests - verify run_selftest / _delete_all_named / _print_selftest
-WITHOUT a live Bitwig.
+"""Diagnostics tests - verify run_selftest / _occupied / _delete_index /
+_print_selftest WITHOUT a live Bitwig.
 
 A `FakeBridge` (same idea as tests/test_api.py) records every outgoing
 (method, params) and answers the read calls the resolver self-test makes:
 ``resolver.classes``, ``state.snapshot``, ``track.create`` / ``track.delete``,
 ``track.select``, ``resolver.probe`` and ``resolver.result``. That lets us assert
 the resolver's half of the contract (the probe track is created and always
-deleted, the report shape, the not-connected short-circuit) and the doctor's
-capability-matrix printout, none of which needs a real bridge.
+deleted by INDEX-DIFF, the report shape, the not-connected short-circuit) and the
+doctor's capability-matrix printout, none of which needs a real bridge.
 """
 import pytest
 
 import openwig.diagnostics as diag
+from openwig.bridge import BridgeError
 from openwig.diagnostics import (
     PROBE_TRACK,
     run_selftest,
-    _delete_all_named,
-    _find_track_index,
+    _occupied,
+    _delete_index,
 )
 from openwig.cli.install import _print_selftest
 
 
-# ── a scriptable fake bridge ────────────────────────────────────────────────────
+# -- a scriptable fake bridge ------------------------------------------------------
 
 GOOD_REPORT = {
     "ok": True,
@@ -40,24 +41,30 @@ class FakeBridge:
     """Records outgoing requests; answers the read calls run_selftest makes.
 
     Tracks live in ``self.tracks`` (list of {"name", "index"} dicts). track.create
-    appends one, track.delete removes by index and re-numbers, so we can assert the
-    probe track is gone at the end. ``classes`` / ``probe_report`` / ``probe_error``
-    are scripted per test. ``appear_after`` controls how many snapshot polls happen
-    before the freshly created probe track becomes visible (None = never appears).
+    appends one (with ``create_name`` if given, else the requested name) once the
+    snapshot has been polled ``appear_after`` times; track.delete removes by index,
+    so we can assert the probe slot is gone at the end. ``classes`` / ``probe_report``
+    / ``probe_error`` are scripted per test. ``appear_after=None`` means the new slot
+    never appears (the probe-never-shows case). ``create_name`` lets a test simulate a
+    FAILED RENAME: the created track lands under a name other than PROBE_TRACK.
     """
 
     def __init__(self, *, connected=True, classes=None, probe_report=None,
-                 probe_error=None, appear_after=0, seed_tracks=None):
+                 probe_error=None, appear_after=0, seed_tracks=None,
+                 create_name=None, delete_raises=False):
         self.calls = []                       # [(method, params), ...] in order
         self.connected = connected
         self.classes = classes if classes is not None else {
             "bitwig": "5.2", "classes": {"Foo": True, "Bar": True}}
         self.probe_report = probe_report
         self.probe_error = probe_error
-        self.appear_after = appear_after      # snapshot polls before probe shows
+        self.appear_after = appear_after      # snapshot polls before the slot shows
         self.tracks = list(seed_tracks or [])
-        self._snap_polls = 0                   # counts post-create snapshot reads
-        self._created_probe = False
+        self.create_name = create_name        # if set, the appended track uses this name
+        self.delete_raises = delete_raises    # track.delete raises BridgeError
+        self._pending_name = None             # name to append once it "appears"
+        self._snap_polls = 0                  # counts post-create snapshot reads
+        self._next_index = (max((t["index"] for t in self.tracks), default=-1) + 1)
 
     # --- the bridge surface run_selftest uses ---
     def wait_connected(self, _timeout):
@@ -69,22 +76,22 @@ class FakeBridge:
         if method == "resolver.classes":
             return dict(self.classes)
         if method == "state.snapshot":
-            if self._created_probe and self.appear_after is not None:
+            if self._pending_name is not None and self.appear_after is not None:
                 if self._snap_polls >= self.appear_after:
-                    if not any(t["name"] == PROBE_TRACK for t in self.tracks):
-                        self.tracks.append(
-                            {"name": PROBE_TRACK, "index": len(self.tracks)})
+                    self.tracks.append(
+                        {"name": self._pending_name, "index": self._next_index})
+                    self._next_index += 1
+                    self._pending_name = None
                 self._snap_polls += 1
-            return {"tracks": list(self.tracks)}
+            return {"tracks": [dict(t) for t in self.tracks]}
         if method == "track.create":
-            if params.get("name") == PROBE_TRACK:
-                self._created_probe = True
+            self._pending_name = self.create_name or params.get("name")
             return {}
         if method == "track.delete":
+            if self.delete_raises:
+                raise BridgeError("cannot delete")
             idx = params.get("index")
             self.tracks = [t for t in self.tracks if t["index"] != idx]
-            for i, t in enumerate(self.tracks):   # re-number like a real bank
-                t["index"] = i
             return {}
         if method == "track.select":
             return {}
@@ -108,6 +115,9 @@ class FakeBridge:
     def probe_track_count(self):
         return sum(1 for t in self.tracks if t["name"] == PROBE_TRACK)
 
+    def track_names(self):
+        return [t["name"] for t in self.tracks]
+
 
 @pytest.fixture(autouse=True)
 def _no_sleep(monkeypatch):
@@ -115,7 +125,7 @@ def _no_sleep(monkeypatch):
     monkeypatch.setattr(diag.time, "sleep", lambda *a, **k: None)
 
 
-# ── run_selftest: happy path ─────────────────────────────────────────────────────
+# -- run_selftest: happy path ------------------------------------------------------
 
 def test_selftest_happy_path_returns_report_connected():
     b = FakeBridge(probe_report=dict(GOOD_REPORT))
@@ -130,13 +140,17 @@ def test_selftest_happy_path_returns_report_connected():
 
 
 def test_selftest_happy_path_creates_and_deletes_probe_track():
-    b = FakeBridge(probe_report=dict(GOOD_REPORT))
+    # seed a pre-existing track so we can assert the bank returns to this exact state
+    pre = [{"name": "Drums", "index": 0}]
+    b = FakeBridge(probe_report=dict(GOOD_REPORT), seed_tracks=[dict(t) for t in pre])
     run_selftest(b)
     # the probe track was created ...
     assert PROBE_TRACK in b.created_names()
     # ... and cleaned up by the finally block (none left in the bank)
     assert b.probe_track_count() == 0
     assert "track.delete" in b.methods()
+    # the track list returns to its pre-probe state
+    assert b.track_names() == ["Drums"]
 
 
 def test_selftest_happy_path_selects_probe_then_probes():
@@ -149,7 +163,36 @@ def test_selftest_happy_path_selects_probe_then_probes():
     assert ms.index("resolver.probe") < ms.index("resolver.result")
 
 
-# ── run_selftest: not connected ──────────────────────────────────────────────────
+def test_selftest_picks_only_the_new_slot_by_index_diff():
+    # two pre-existing tracks; the probe slot must be the NEW (max new) index
+    b = FakeBridge(probe_report=dict(GOOD_REPORT), seed_tracks=[
+        {"name": "Drums", "index": 0}, {"name": "Bass", "index": 1}])
+    run_selftest(b)
+    # the select hit the new slot (index 2), not a pre-existing one
+    selected = [p.get("index") for m, p in b.calls if m == "track.select"]
+    assert selected == [2]
+    # cleanup left the two originals intact
+    assert b.track_names() == ["Drums", "Bass"]
+
+
+# -- run_selftest: index-diff cleanup of a FAILED RENAME ---------------------------
+
+def test_selftest_cleans_up_failed_rename_slot():
+    # the post-create rename silently fails: the new track lands as "Inst 2",
+    # NOT PROBE_TRACK. run_selftest must still delete it by index-diff.
+    pre = [{"name": "Drums", "index": 0}]
+    b = FakeBridge(probe_report=dict(GOOD_REPORT),
+                   seed_tracks=[dict(t) for t in pre],
+                   create_name="Inst 2")
+    rep = run_selftest(b)
+    assert rep["connected"] is True
+    # the differently-named new slot was removed in the finally
+    assert "Inst 2" not in b.track_names()
+    assert b.track_names() == ["Drums"]
+    assert "track.delete" in b.methods()
+
+
+# -- run_selftest: not connected ---------------------------------------------------
 
 def test_selftest_not_connected_short_circuits():
     b = FakeBridge(connected=False)
@@ -160,32 +203,37 @@ def test_selftest_not_connected_short_circuits():
     assert "resolver.classes" not in b.methods()
 
 
-# ── run_selftest: probe track never appears ──────────────────────────────────────
+# -- run_selftest: probe track never appears ---------------------------------------
 
 def test_selftest_probe_never_appears_returns_classes_and_error():
     b = FakeBridge(appear_after=None, probe_report=dict(GOOD_REPORT))
     rep = run_selftest(b)
     assert rep["connected"] is True
     assert rep["classes"] == {"Foo": True, "Bar": True}
+    assert rep["bitwig"] == "5.2"
     assert "probe track did not appear" in rep["error"]
-    # never selected / probed because the track was not found
+    # never selected / probed because the slot was not found
     assert "resolver.probe" not in b.methods()
-    # finally still ran cleanup
+    assert "track.select" not in b.methods()
+    # finally still ran cleanup (nothing leaked)
     assert b.probe_track_count() == 0
 
 
-# ── run_selftest: self-heal leftover probe track ─────────────────────────────────
+# -- run_selftest: self-heal leftover probe track ----------------------------------
 
 def test_selftest_self_heals_leftover_probe_track():
+    # a leftover probe track from a prior run is in `before`, so it is NOT in the
+    # index-diff; it should stay (run_selftest only removes slots it created).
     leftover = [{"name": PROBE_TRACK, "index": 0}]
     b = FakeBridge(probe_report=dict(GOOD_REPORT), seed_tracks=leftover)
     rep = run_selftest(b)
     assert rep["connected"] is True
-    # the pre-existing leftover was cleared and nothing is left behind
-    assert b.probe_track_count() == 0
+    # the slot it actually created during the probe is cleaned up; track list
+    # returns to the pre-probe state (the leftover is untouched).
+    assert b.track_names() == [PROBE_TRACK]
 
 
-# ── run_selftest: report falls back to base when result has no report ─────────────
+# -- run_selftest: report falls back to base when result has no report --------------
 
 def test_selftest_no_report_falls_back_to_base_with_error():
     b = FakeBridge(probe_report=None, probe_error="resolver blew up")
@@ -195,45 +243,26 @@ def test_selftest_no_report_falls_back_to_base_with_error():
     assert rep["error"] == "resolver blew up"
 
 
-# ── _find_track_index ────────────────────────────────────────────────────────────
+# -- _occupied ---------------------------------------------------------------------
 
-def test_find_track_index_by_name():
+def test_occupied_returns_only_named_indices():
     b = FakeBridge(seed_tracks=[
-        {"name": "Drums", "index": 0}, {"name": PROBE_TRACK, "index": 1}])
-    assert _find_track_index(b, PROBE_TRACK) == 1
-    assert _find_track_index(b, "nope") is None
-
-
-# ── _delete_all_named ────────────────────────────────────────────────────────────
-
-def test_delete_all_named_removes_every_duplicate():
-    b = FakeBridge(seed_tracks=[
-        {"name": PROBE_TRACK, "index": 0},
-        {"name": "keep", "index": 1},
-        {"name": PROBE_TRACK, "index": 2},
-        {"name": PROBE_TRACK, "index": 3},
+        {"name": "Drums", "index": 0},
+        {"name": "", "index": 1},          # empty name -> not occupied
+        {"name": None, "index": 2},        # no name -> not occupied
+        {"name": "Bass", "index": 3},
     ])
-    _delete_all_named(b, PROBE_TRACK)
-    assert b.probe_track_count() == 0
-    assert [t["name"] for t in b.tracks] == ["keep"]
+    assert _occupied(b) == {0, 3}
 
 
-def test_delete_all_named_noop_when_absent():
-    b = FakeBridge(seed_tracks=[{"name": "keep", "index": 0}])
-    _delete_all_named(b, PROBE_TRACK)
-    assert "track.delete" not in b.methods()
+def test_delete_index_swallows_bridge_error():
+    b = FakeBridge(seed_tracks=[{"name": "Drums", "index": 0}], delete_raises=True)
+    # must not raise even though the bridge rejects the delete
+    _delete_index(b, 0)
+    assert "track.delete" in b.methods()
 
 
-def test_delete_all_named_respects_limit():
-    # five duplicates but a limit of 2 -> only two deletes attempted
-    b = FakeBridge(seed_tracks=[
-        {"name": PROBE_TRACK, "index": i} for i in range(5)])
-    _delete_all_named(b, PROBE_TRACK, limit=2)
-    assert b.methods().count("track.delete") == 2
-    assert b.probe_track_count() == 3
-
-
-# ── _print_selftest ──────────────────────────────────────────────────────────────
+# -- _print_selftest ---------------------------------------------------------------
 
 # the resolver class-load map: all nine internal classes present on a good build
 _ALL_CLASSES = {
@@ -333,3 +362,37 @@ def test_print_selftest_reports_missing_classes(capsys):
     assert "MISSING: " in out
     assert "BOg" in out
     assert "WZK" in out
+
+
+# -- _print_selftest: NEW optional report fields (reader / cache / symbol_source) ---
+
+def test_print_selftest_prints_reader_cache_written_and_symbol_source(capsys):
+    rep = _rep_all_ok()
+    rep["reader"] = {"mX_": "mX_", "KRt": "KRt", "bf": "bf", "ngq": "ngq",
+                     "nI_": "nI_", "Xzy": "Xzy", "uEK": "uEK"}
+    rep["cache"] = {"written": True, "path": "/home/u/.openwig/symbols.json"}
+    rep["symbol_source"] = "resolved live (cached)"
+    rc = _print_selftest(rep)
+    out = capsys.readouterr().out
+    assert rc == 0
+    # reader line names the resolved reader symbols
+    assert "reader" in out
+    assert "mX_" in out
+    assert "ngq" in out
+    assert "uEK" in out
+    # cache line shows the written path
+    assert "cache" in out
+    assert "/home/u/.openwig/symbols.json" in out
+    # symbol source line
+    assert "symbol source" in out
+    assert "resolved live (cached)" in out
+
+
+def test_print_selftest_prints_cache_not_written_reason(capsys):
+    rep = _rep_all_ok()
+    rep["cache"] = {"written": False, "reason": "read-only filesystem"}
+    rc = _print_selftest(rep)
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "not written" in out
+    assert "read-only filesystem" in out
