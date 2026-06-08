@@ -104,7 +104,9 @@ def _print_selftest(rep) -> int:
     rc = 0
     for key, label in (("automation_write", "automation  "),
                        ("clip_create", "clip create "),
-                       ("descriptor_read", "descriptor  ")):
+                       ("descriptor_read", "descriptor  "),
+                       ("serialize", "serialize   "),
+                       ("normalize", "normalize   ")):
         c = caps.get(key) or {}
         ok = c.get("ok")
         print(f"  {label} : {'OK  ' if ok else 'FAIL'}  ({c.get('detail', '')})")

@@ -117,6 +117,10 @@ function init() {
     masterTrack = host.createMasterTrack(0);
     sceneBank   = host.createSceneBank(NUM_SCENES);
     cursorTrack = host.createCursorTrack("openwig-cursor", "Openwig Cursor", NUM_SENDS, NUM_CLIPS, true);
+    // mark cursor-track volume/pan values so the resolver self-test can read their raw +
+    // normalized values (the normalize-fn probe); .get()/.getRaw() throw without this.
+    cursorTrack.volume().markInterested(); cursorTrack.volume().value().markInterested();
+    cursorTrack.pan().markInterested();    cursorTrack.pan().value().markInterested();
     cursorDevice       = cursorTrack.createCursorDevice();
     remoteControlsPage = cursorDevice.createCursorRemoteControlsPage(NUM_REMOTE);
     // Mark properties needed by device.all_remote_pages - otherwise .get() on
@@ -910,14 +914,17 @@ function _hostInfo() {
 }
 
 // Every obfuscated class literal the reflection paths load via Java.type. A renamed class
-// here is the cheapest possible breakage signal: the load just throws.
+// here is the cheapest possible breakage signal: the load just throws. Grouped by feature.
 var _RESOLVER_CLASSES = [
-    "fj",                                          // document automatable-value base
-    "oJk",                                         // automation interpolation enum (LINEAR/HOLD)
-    "com.bitwig.flt.document.core.master.a1x",     // automation value-ref identity: a1x.r3B(fj)
-    "X2S",                                         // arranger clip-create command host
-    "alU",                                         // insert-note command host
-    "com.bitwig.ramona.serial.SZo"                 // serialize filter (descriptor reader)
+    "fj",                                          // automation: document automatable-value base
+    "oJk",                                         // automation: interpolation enum (LINEAR/HOLD)
+    "com.bitwig.flt.document.core.master.a1x",     // automation: value-ref identity a1x.r3B(fj)
+    "X2S",                                         // clip-create: command host
+    "alU",                                         // clip-create: insert-note command host
+    "com.bitwig.ramona.serial.SZo",                // descriptor reader + serialize filter
+    "ZjS",                                         // audio-clip / file insert dispatch token
+    "BOg",                                         // sidechain routing component base
+    "com.bitwig.flt.document.core.master.device.WZK" // device automation-target command host
 ];
 function _resolverClasses() {
     var out = {};
@@ -950,7 +957,9 @@ function _runResolverProbe() {
         capabilities: {
             automation_write: { ok: false, detail: "" },
             clip_create:      { ok: false, detail: "" },
-            descriptor_read:  { ok: false, detail: "" }
+            descriptor_read:  { ok: false, detail: "" },
+            serialize:        { ok: false, detail: "" },
+            normalize:        { ok: false, detail: "" }
         },
         ok: false
     };
@@ -991,6 +1000,29 @@ function _runResolverProbe() {
         report.capabilities.clip_create.detail += noteFound ? " | verified" : " | sentinel NOT found";
     }
 
+    // 4. serialize: Bitwig's own serializer turns the track document into bytes (SZo filter).
+    //    Used by track.serialize and underpins the descriptor reader's serialize filter.
+    try {
+        var SZo = Java.type("com.bitwig.ramona.serial.SZo");
+        var bytes = byU.SWC(SZo.uEK);
+        var nb = (bytes == null) ? 0 : bytes.length;
+        report.capabilities.serialize.ok = nb > 0;
+        report.capabilities.serialize.detail = "serialized " + nb + " bytes";
+    } catch (e) { report.capabilities.serialize.detail = "failed: " + e; }
+
+    // 5. normalize: resolve a parameter's native->0..1 normalize fn (structural, behavioural).
+    //    Underpins device.remote_normalize and exact automation/breakpoint value conversion.
+    try {
+        var vp = cursorTrack.volume();
+        var vdt = vp.getDeepestTarget();
+        var vfj = _fjFrom(_invokeNoArg(vdt, "getAtom")); if (vfj == null) vfj = _fjFrom(vdt);
+        if (vfj == null) throw "no fj for volume";
+        var curN = vp.value().getRaw(), curNorm = vp.value().get();
+        var nf = _findNormalizeFn(vfj, curN, curNorm);
+        report.capabilities.normalize.ok = (nf != null);
+        report.capabilities.normalize.detail = nf ? ("resolved " + nf.getName() + "()") : "no normalize fn found";
+    } catch (e) { report.capabilities.normalize.detail = "failed: " + e; }
+
     // structurally-discovered automation symbols (for transparency + crowdsourced maps):
     // these names should match the hardcoded ones on a supported build.
     if (_AUTO_SYM) {
@@ -1005,8 +1037,9 @@ function _runResolverProbe() {
         };
     }
 
-    report.ok = report.capabilities.automation_write.ok && report.capabilities.clip_create.ok &&
-                report.capabilities.descriptor_read.ok;
+    var caps = report.capabilities;
+    report.ok = caps.automation_write.ok && caps.clip_create.ok && caps.descriptor_read.ok &&
+                caps.serialize.ok && caps.normalize.ok;
     return report;
 }
 
