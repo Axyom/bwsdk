@@ -43,7 +43,18 @@ openwig 0.1.3 (supports Bitwig: 6.x)
 controller dir : C:\Users\<you>\Documents\Bitwig Studio\Controller Scripts
 controller     : OK
 bridge :7777   : OK (Bitwig 6.0.6) compatible
+internals      : self-test on a throwaway track ...
+  classes      : 6/6 internal classes load
+  automation   : OK
+  clip create  : OK
+  descriptor   : OK
+  => all reflection paths verified on this Bitwig build
 ```
+
+`doctor` runs a self-test on a temporary track (created and deleted automatically,
+existing tracks untouched) that confirms openwig's reflection paths work on your exact
+Bitwig build. If any line says `FAIL`, that build is unsupported: please
+[open an issue](https://github.com/Axyom/openwig/issues) with the output.
 
 Then write your [first song](quickstart.md).
 
