@@ -121,6 +121,11 @@ def _print_selftest(rep) -> int:
     rd = rep.get("reader")
     if rd:
         print(f"  reader       : resolved (mX_={rd.get('mX_')}, ngq={rd.get('ngq')}, uEK={rd.get('uEK')})")
+    cmds = rep.get("commands")
+    if cmds:
+        cc, nc = cmds.get("clipCmd") or {}, cmds.get("noteCmd") or {}
+        tag = "by op-id" if cmds.get("resolved") else "SEED (op-id lookup failed)"
+        print(f"  commands     : {tag} (clip={cc.get('cls')}.{cc.get('factory')}, note={nc.get('cls')}.{nc.get('factory')})")
     cache = rep.get("cache") or {}
     if cache.get("written"):
         print(f"  cache        : written -> {cache.get('path')}")

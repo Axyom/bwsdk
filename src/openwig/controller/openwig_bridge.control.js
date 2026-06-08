@@ -54,7 +54,11 @@ var SYM = {
     // descriptor reader (discovered structurally)
     mX_: "mX_", KRt: "KRt", bf: "bf", ngq: "ngq", nI_: "nI_", Xzy: "Xzy", uEK: "uEK",
     // serializer class (leaf obfuscated; package stable)
-    SZo: "com.bitwig.ramona.serial.SZo"
+    SZo: "com.bitwig.ramona.serial.SZo",
+    // command hosts, resolved by stable op-id (clip create = 7350, note insert = 7349).
+    // Each: Java.type(cls).<field>.<factory>().<exec>(target, argsList). Defaults are seeds.
+    clipCmd: { cls: "X2S", field: "fiU", factory: "qgm", exec: "r3B", opid: 7350 },
+    noteCmd: { cls: "alU", field: "r3B", factory: "XaN", exec: "r3B", opid: 7349 }
 };
 var gSymSource = "seed";                       // "seed" | "cache" | "discovered"
 var gOpsDone = 0;                            // count of finished document-thread ops (completion signal; see ops.done)
@@ -668,6 +672,96 @@ function _classOf(o) {
     if (_GETCLASS == null) { _GETCLASS = Java.type("java.lang.Object").class.getMethod("getClass"); _GETCLASS.setAccessible(true); }
     return _GETCLASS.invoke(o);
 }
+// ── op-id command discovery: resolve obfuscated command-host classes (clip create, note
+// insert, ...) by the STABLE numeric op-id the command exposes via ngq(), rather than by
+// hardcoded class name. The op-id is wire-protocol data (not obfuscated), so this survives a
+// re-obfuscated build. Scans the Bitwig jar's default package (one-time, at doctor).
+var _JAR_CLASSES = null, _gCmdScanInstantiated = 0;
+function _jarDefaultPkgClasses() {
+    if (_JAR_CLASSES) return _JAR_CLASSES;
+    var loc = host.getClass().getProtectionDomain().getCodeSource().getLocation();
+    var jarFile = new (Java.type("java.io.File"))(loc.toURI());
+    var zf = new (Java.type("java.util.zip.ZipFile"))(jarFile), en = zf.entries(), names = [];
+    while (en.hasMoreElements()) {
+        var n = "" + en.nextElement().getName();
+        if (n.length < 7 || n.substring(n.length - 6) !== ".class") continue;
+        if (n.indexOf("/") === -1) names.push(n.substring(0, n.length - 6));
+    }
+    zf.close(); _JAR_CLASSES = names; return names;
+}
+// First 2-arg method on rt (hierarchy) taking (non-primitive [byU-assignable if given], List).
+function _hasExec(rt, byUClass, ListC) {
+    var c = rt;
+    while (c != null) {
+        var ms = c.getDeclaredMethods();
+        for (var i = 0; i < ms.length; i++) {
+            var m = ms[i]; if (m.getParameterCount() !== 2) continue;
+            var ps = m.getParameterTypes();
+            if (ps[0].isPrimitive() || !ListC.isAssignableFrom(ps[1])) continue;
+            if (byUClass != null && !ps[0].isAssignableFrom(byUClass)) continue;
+            return "" + m.getName();
+        }
+        c = c.getSuperclass();
+    }
+    return null;
+}
+// Find command hosts for a SET of op-ids in a single jar pass (early-stops once all are
+// found). Returns { opid: {cls, field, factory, exec} }. `byUClass`, if given, requires the
+// command's exec to accept it as the first arg (narrows + speeds the clip-create case).
+function _findCommandsByOpIds(opids, byUClass) {
+    var names = _jarDefaultPkgClasses();
+    var Class = Java.type("java.lang.Class"), Mod = Java.type("java.lang.reflect.Modifier");
+    var ListC = Java.type("java.util.List").class, cl = host.getClass().getClassLoader();
+    var want = {}, found = {}, remaining = 0;
+    for (var w = 0; w < opids.length; w++) { want["" + opids[w]] = true; remaining++; }
+    for (var i = 0; i < names.length && remaining > 0; i++) {
+        var cls; try { cls = Class.forName(names[i], false, cl); } catch (e) { continue; }
+        var fields; try { fields = cls.getDeclaredFields(); } catch (e) { continue; }
+        for (var f = 0; f < fields.length && remaining > 0; f++) {
+            if (!Mod.isStatic(fields[f].getModifiers())) continue;
+            var T = fields[f].getType(); if (T.isPrimitive() || T.isArray()) continue;
+            var tc = T, seenM = {};
+            while (tc != null) {
+                var tms = tc.getDeclaredMethods();
+                for (var m = 0; m < tms.length; m++) {
+                    var M = tms[m]; if (M.getParameterCount() !== 0) continue;
+                    var mn = "" + M.getName(); if (seenM[mn]) continue; seenM[mn] = 1;
+                    var RT = M.getReturnType(); if (RT.isPrimitive() || RT.isArray()) continue;
+                    if (!_hasNoArgNamed(RT, SYM.ngq)) continue;          // command exposes a prop/op id
+                    var execName = _hasExec(RT, byUClass, ListC); if (execName == null) continue;
+                    try {
+                        fields[f].setAccessible(true);
+                        var val = fields[f].get(null); if (val == null) continue;
+                        M.setAccessible(true); var cmd = M.invoke(val); if (cmd == null) continue;
+                        _gCmdScanInstantiated++;
+                        var id = "" + _invokeNoArg(cmd, SYM.ngq);
+                        if (want[id] && !found[id]) {
+                            found[id] = { cls: names[i], field: "" + fields[f].getName(), factory: mn, exec: execName };
+                            remaining--;
+                        }
+                    } catch (e) {}
+                }
+                tc = tc.getSuperclass();
+            }
+        }
+    }
+    return found;
+}
+
+// True if cls (or any superclass/interface) declares a no-arg method named `name`, including
+// non-public ones (getMethods() would miss those). Used by jar-scan structural fingerprints.
+function _hasNoArgNamed(cls, name) {
+    var c = cls;
+    while (c != null) {
+        var ms = c.getDeclaredMethods();
+        for (var i = 0; i < ms.length; i++)
+            if (ms[i].getParameterCount() === 0 && ("" + ms[i].getName()) === name) return true;
+        var ifs = c.getInterfaces();
+        for (var k = 0; k < ifs.length; k++) if (_hasNoArgNamed(ifs[k], name)) return true;
+        c = c.getSuperclass();
+    }
+    return false;
+}
 
 // The breakpoint-insert method has a very specific 8-arg shape:
 //   (valueRef, double time, double value, double curvature, boolean, boolean, Enum interp, Object)
@@ -874,17 +968,31 @@ function automationWriteOffline(p) {
 // same GUI commands the wire ops would dispatch, reached via internal command objects.
 // Extracted so the public handler and the resolver self-test share one path.
 // Returns { created, notes, start, duration }.
+// Resolve a command spec {cls, field, factory, exec} into { cmd, exec(Method) }. The field
+// is a static singleton, factory() yields the command, exec(target, List) dispatches it.
+function _findField(cls, name) {
+    var c = cls; while (c != null) { try { return c.getDeclaredField(name); } catch (e) {} c = c.getSuperclass(); }
+    return null;
+}
+function _cmdResolve(spec) {
+    var clsObj = Java.type(spec.cls).class;
+    var fld = _findField(clsObj, spec.field); if (fld == null) throw "command field " + spec.cls + "." + spec.field + " not found";
+    fld.setAccessible(true);
+    var holder = fld.get(null); if (holder == null) throw "command field " + spec.field + " is null";
+    var cmd = _invokeNoArg(holder, spec.factory);
+    var em = _findMethod(_classOf(cmd), spec.exec, 2, null);
+    if (em == null) throw "command exec " + spec.exec + " not found";
+    return { cmd: cmd, exec: em };
+}
 function _insertClip(byU, start, dur, notes) {
-    // alU = real class (CFR renamed source file to alu_1.java to avoid case-insensitive
-    // FS collision with sibling classes alu / aLu / aLU - all four exist in default pkg).
-    var X2S = Java.type("X2S"), alu1 = Java.type("alU");
     var ArrayList = Java.type("java.util.ArrayList");
     var Dbl = Java.type("java.lang.Double"), Int = Java.type("java.lang.Integer");
     var args1 = new ArrayList();
     args1.add(Dbl.valueOf(start)); args1.add(Dbl.valueOf(dur));
-    var clipDoc = X2S.fiU.qgm().r3B(byU, args1);
+    var cc = _cmdResolve(SYM.clipCmd);                    // op-id-resolved (seed default = X2S)
+    var clipDoc = cc.exec.invoke(cc.cmd, byU, args1);
     if (clipDoc == null) throw "clip create returned null";
-    var cmdNote = alu1.r3B.XaN();
+    var nc = _cmdResolve(SYM.noteCmd);                    // op-id-resolved (seed default = alU)
     for (var i = 0; i < notes.length; i++) {
         var n = notes[i];
         var args2 = new ArrayList();
@@ -893,7 +1001,7 @@ function _insertClip(byU, start, dur, notes) {
         args2.add(Dbl.valueOf(Number(n[2])));        // start_in_clip
         args2.add(Dbl.valueOf(Number(n[3])));        // duration
         args2.add(Dbl.valueOf(Number(n[4])));        // velocity
-        cmdNote.r3B(clipDoc, args2);
+        nc.exec.invoke(nc.cmd, clipDoc, args2);
     }
     return { created: 1, notes: notes.length, start: start, duration: dur };
 }
@@ -1092,7 +1200,7 @@ function _discoverReader(uo1, sentinels) {
 // build fingerprint; the bridge loads them at init. The reader is the one path that cannot
 // self-validate during a plain read (no sentinel to check against), so it relies on the
 // cache; automation/clip resolve + validate live on every write.
-var _CACHE_SCHEMA = 2;
+var _CACHE_SCHEMA = 3;   // bump invalidates old caches (added clipCmd/noteCmd)
 function _fingerprint() {
     var parts = [];
     try { parts.push("v=" + host.getHostVersion()); } catch (e) {}
@@ -1128,12 +1236,19 @@ function _applyReaderNames(rd) {
     if (rd.ngq) SYM.ngq = rd.ngq; if (rd.nI_) SYM.nI_ = rd.nI_; if (rd.Xzy) SYM.Xzy = rd.Xzy;
     if (rd.uEK) SYM.uEK = rd.uEK;
 }
+// Apply a command spec {cls,field,factory,exec} into SYM (preserving the opid).
+function _applyCommandSpec(target, spec) {
+    if (!spec || !spec.cls) return;
+    target.cls = spec.cls; target.field = spec.field; target.factory = spec.factory; target.exec = spec.exec;
+}
 // init-time load: trust the cache only if its fingerprint matches THIS build.
 function _loadSymbolCache() {
     var c = _readCache();
     if (c && c.fingerprint === _fingerprint() && c.reader) {
         _applyReaderNames(c.reader);
         if (c.SZo) SYM.SZo = c.SZo;
+        if (c.clipCmd) _applyCommandSpec(SYM.clipCmd, c.clipCmd);
+        if (c.noteCmd) _applyCommandSpec(SYM.noteCmd, c.noteCmd);
         gSymSource = "cache";
     } else {
         gSymSource = c ? "seed (cache stale; re-run doctor)" : "seed (no cache; run doctor)";
@@ -1212,7 +1327,7 @@ function _runResolverProbe() {
     var byU = cursorTrack.getDeepestTarget();
     if (byU == null) { report.error = "no track target (probe track not selected)"; return report; }
 
-    // 1. arranger automation write (to track volume)
+    // 1. arranger automation write (self-discovered, name-free).
     try {
         var r = _insertAutomationPoints(byU, function () { return cursorTrack.volume(); }, "volume",
             [[_SENT_AUTO_T, 0.3], [_SENT_AUTO_T2, 0.7]]);
@@ -1220,18 +1335,33 @@ function _runResolverProbe() {
         report.capabilities.automation_write.via = r.via;
     } catch (e) { report.capabilities.automation_write.detail = "insert failed: " + e; }
 
-    // 2. arranger clip + one note
+    // 1.5 discover the descriptor-reader names, validated by the automation sentinel just
+    //     written (the note sentinel does not exist yet). Apply into SYM so everything below
+    //     (command op-id lookup via SYM.ngq, descriptor read) uses the RESOLVED reader.
+    var rd = null;
+    try { rd = _discoverReader(byU, ["1.414213", "2.236067"]); }
+    catch (e) { report.reader_err = "" + e; }
+    if (rd) { _applyReaderNames(rd); report.reader = rd; }
+
+    // 1.7 resolve the clip-create + note-insert command hosts by stable op-id (jar scan;
+    //     doctor-only). Uses SYM.ngq (just resolved) to read each command's op-id. Skipped in
+    //     blind mode. On success SYM.clipCmd/noteCmd point at the resolved classes.
+    if (!gBlindDiscovery) {
+        try {
+            var got = _findCommandsByOpIds([SYM.clipCmd.opid, SYM.noteCmd.opid], null);
+            var gc = got["" + SYM.clipCmd.opid], gn = got["" + SYM.noteCmd.opid];
+            if (gc) _applyCommandSpec(SYM.clipCmd, gc);
+            if (gn) _applyCommandSpec(SYM.noteCmd, gn);
+            report.commands = { clipCmd: SYM.clipCmd, noteCmd: SYM.noteCmd, resolved: !!(gc && gn),
+                                instantiated: _gCmdScanInstantiated };
+        } catch (e) { report.commands_err = "" + e; }
+    }
+
+    // 2. arranger clip + one note (via the resolved command hosts).
     try {
         var c = _insertClip(byU, 0.0, 4.0, [[0, _SENT_NOTE_KEY, _SENT_NOTE_START, 0.5, _SENT_NOTE_VEL]]);
         report.capabilities.clip_create.detail = "created clip, " + c.notes + " note(s)";
     } catch (e) { report.capabilities.clip_create.detail = "create failed: " + e; }
-
-    // 2.5 discover the descriptor-reader names (validated by the sentinels we just wrote) and
-    //     apply them into SYM, so the descriptor read below exercises the RESOLVED reader.
-    var rd = null;
-    try { rd = _discoverReader(byU, ["1.414213", "2.236067", "1.618033", "0.6789"]); }
-    catch (e) { report.reader_err = "" + e; }
-    if (rd) { _applyReaderNames(rd); report.reader = rd; }
 
     // 3. descriptor read-back + sentinel verification
     var json = null;
@@ -1299,7 +1429,7 @@ function _runResolverProbe() {
     if (!gBlindDiscovery && rd && caps.descriptor_read.ok) {
         var cacheObj = {
             schema: _CACHE_SCHEMA, fingerprint: _fingerprint(), bitwig: report.bitwig,
-            reader: rd, SZo: SYM.SZo,
+            reader: rd, SZo: SYM.SZo, clipCmd: SYM.clipCmd, noteCmd: SYM.noteCmd,
             verdicts: { automation: caps.automation_write.ok, clip: caps.clip_create.ok,
                         descriptor: caps.descriptor_read.ok, serialize: caps.serialize.ok, normalize: caps.normalize.ok }
         };

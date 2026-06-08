@@ -33,7 +33,7 @@ def _delete_index(b, idx):
         pass
 
 
-def run_selftest(b=None, *, timeout=15.0):
+def run_selftest(b=None, *, timeout=90.0):
     """Run the resolver self-test against live Bitwig.
 
     Returns the report dict from ``resolver.probe`` augmented with a top-level
