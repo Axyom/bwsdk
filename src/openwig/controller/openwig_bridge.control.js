@@ -901,45 +901,15 @@ function _insertAutoDiscovered(byU, pp, pts) {
     }
     throw lastErr;
 }
-// The original hardcoded-name path, kept as a fallback when discovery fails.
-function _insertAutoHardcoded(byU, paramProxy, pts) {
-    var al = _invokeNoArg(byU, "zer");                       // automation_lanes (udG)
-    var pp = paramProxy();
-    var fj = _fjFrom(_invokeNoArg(pp.getDeepestTarget(), "getAtom"));
-    if (fj == null) fj = _fjFrom(pp.getDeepestTarget());
-    if (fj == null) throw "could not resolve fj for param";
-    var a1x = Java.type("com.bitwig.flt.document.core.master.a1x").r3B(fj);
-    var oJk = Java.type("oJk"), LINEAR = oJk.Xzy, HOLD = oJk.r3B;
-    var Dbl = Java.type("java.lang.Double"), Bl = Java.type("java.lang.Boolean");
-    var m = _findAutomationInsert(al.getClass());
-    var n = 0;
-    for (var i = 0; i < pts.length; i++) {
-        var pt = pts[i];
-        var hasCurv = (pt.length > 2 && pt[2] != null);
-        var curv = hasCurv ? pt[2] : 0.0;
-        var interp = (pt.length > 3 && ("" + pt[3]) === "hold") ? HOLD : LINEAR;
-        m.invoke(al, a1x, Dbl.valueOf(pt[0]), Dbl.valueOf(pt[1]), Dbl.valueOf(curv),
-                 Bl.valueOf(hasCurv), Bl.FALSE, interp, null);
-        n++;
-    }
-    return n;
-}
-// Core arranger-automation insert. MUST run on the document-edit thread. Prefers name-free
-// structural discovery; falls back to the hardcoded-name path (unless blind mode forces
-// discovery only). Records how it resolved in the return value. Returns { inserted, param, via }.
+// Core arranger-automation insert. MUST run on the document-edit thread. Resolves the
+// automation cluster purely by name-free structural discovery (validated by execution).
+// Returns { inserted, param, via }.
 var gAutoVia = "?";
 function _insertAutomationPoints(byU, paramProxy, which, pts) {
     var pp = paramProxy();
-    try {
-        var n = _insertAutoDiscovered(byU, pp, pts);
-        gAutoVia = "discovered";
-        return { inserted: n, param: which, via: "discovered" };
-    } catch (eDisc) {
-        if (gBlindDiscovery) { gAutoVia = "failed"; throw eDisc; }   // no fallback in blind mode
-        var n2 = _insertAutoHardcoded(byU, paramProxy, pts);
-        gAutoVia = "hardcoded";
-        return { inserted: n2, param: which, via: "hardcoded", disc_error: "" + eDisc };
-    }
+    var n = _insertAutoDiscovered(byU, pp, pts);
+    gAutoVia = "discovered";
+    return { inserted: n, param: which, via: "discovered" };
 }
 
 function automationWriteOffline(p) {
