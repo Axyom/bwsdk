@@ -53,6 +53,8 @@ var gBlindDiscovery = false;                  // test switch: structural discove
 var SYM = {
     // descriptor reader (discovered structurally)
     mX_: "mX_", KRt: "KRt", bf: "bf", ngq: "ngq", nI_: "nI_", Xzy: "Xzy", uEK: "uEK",
+    // automation value base (discovered from the automation factory signature; seed bootstraps _fjFrom)
+    fj: "fj",
     // serializer class (leaf obfuscated; package stable)
     SZo: "com.bitwig.ramona.serial.SZo",
     // command hosts, resolved by stable op-id (clip create = 7350, note insert = 7349).
@@ -476,9 +478,11 @@ function _invokeNoArg(obj, name) {
     }
     throw "no no-arg method " + name;
 }
-// fj = the document automatable-value base; reach it from a control-surface target
+// fj = the document automatable-value base; reach it from a control-surface target. The fj
+// class name is resolved into SYM.fj (bootstrap seed, overwritten by doctor's cache and by
+// automation discovery), so this is not a hardcoded dependence.
 function _fjFrom(obj) {
-    var fjC = Java.type("fj").class;
+    var fjC = Java.type(SYM.fj).class;
     if (obj != null && fjC.isInstance(obj)) return obj;
     var c = obj.getClass();
     while (c != null) {
@@ -492,21 +496,6 @@ function _fjFrom(obj) {
         c = c.getSuperclass();
     }
     return null;
-}
-// the arranger automation-event insert: r3B(a1x, time, value, curvature, hasCurv, adjPrev, oJk, bT1)
-function _findAutomationInsert(cls) {
-    var c = cls;
-    while (c != null) {
-        var ms = c.getDeclaredMethods();
-        for (var i = 0; i < ms.length; i++) {
-            var m = ms[i]; if (("" + m.getName()) !== "r3B") continue;
-            var ps = m.getParameterTypes(); if (ps.length !== 8) continue;
-            if (("" + ps[0].getSimpleName()) === "a1x" && ("" + ps[1].getName()) === "double" &&
-                ("" + ps[6].getSimpleName()) === "oJk") { m.setAccessible(true); return m; }
-        }
-        c = c.getSuperclass();
-    }
-    throw "automation insert method not found";
 }
 
 // Find a parameter value's NORMALIZE function on its document fj: the 1-arg(double)->
@@ -578,11 +567,145 @@ function _inv1(obj, name, a) {                      // cached reflected 1-arg ca
     return (m == null) ? null : m.invoke(obj, a);
 }
 var _SZUEK = null;
-function _szPass(d, uo1) {                          // Bitwig's own serialize filter (uEK)
+function _szPass(d, uo1) {                          // Bitwig's own serialize filter (uEK mode)
     if (_SZUEK == null) _SZUEK = Java.type(SYM.SZo).uEK;
     var m = _findMethod(_classOf(_SZUEK), "r3B", 2, "cxz_2");
     if (m == null) return true;
     return !!m.invoke(_SZUEK, d, uo1);
+}
+function _descriptors(cwo) {
+    return _inv0(cwo, SYM.KRt);        // java.util.List<cxz_2>
+}
+// uo1.mX_() -> descriptor container, routed through the resolved name.
+function _mx(uo1) { return _invokeNoArg(uo1, SYM.mX_); }
+var _MCACHE = {};
+function _findMethod(cls, name, pcount, p1simple) {
+    var key = cls.getName() + "#" + name + "/" + pcount + "/" + (p1simple || "");
+    if (_MCACHE[key] !== undefined) return _MCACHE[key];
+    var c = cls, found = null;
+    while (c != null && found == null) {
+        var ms = c.getDeclaredMethods();
+        for (var i = 0; i < ms.length; i++) {
+            var m = ms[i];
+            if (("" + m.getName()) !== name || m.getParameterCount() !== pcount) continue;
+            if (p1simple) { var pt = m.getParameterTypes(); if (("" + pt[1].getSimpleName()) !== p1simple) continue; }
+            m.setAccessible(true); found = m; break;
+        }
+        c = c.getSuperclass();
+    }
+    _MCACHE[key] = found; return found;
+}
+function _inv0(obj, name) {                         // cached reflected no-arg call
+    var m = _findMethod(obj.getClass(), name, 0, null);
+    return (m == null) ? null : m.invoke(obj);
+}
+function _inv1(obj, name, a) {                      // cached reflected 1-arg call
+    var m = _findMethod(obj.getClass(), name, 1, null);
+    return (m == null) ? null : m.invoke(obj, a);
+}
+var _SZFILTER = null, _SZMETHOD = null, _SZRESOLVED = false;
+// Resolve Bitwig's serialize filter structurally from the SZo class: a static field holding
+// an SZo filter singleton + its (descriptor, parent)->boolean method. SZo has several filter
+// modes; the reader needs the SERIALIZE filter (the most inclusive), so among the candidates
+// that accept the descriptor + parent types we pick the one that passes the MOST descriptors
+// in a sample. No obfuscated member names. Falls back to "include all" if unresolved.
+function _resolveSzFilter(uo1) {
+    _SZRESOLVED = true;
+    try {
+        var cwo = _mx(uo1), descs = _descriptors(cwo);
+        if (descs == null || descs.size() === 0) { _SZRESOLVED = false; return; }
+        var n = descs.size(), lim = Math.min(n, 60);
+        var dCls = _classOf(descs.get(0)), uCls = _classOf(uo1);
+        var SZo = Java.type(SYM.SZo).class, Mod = Java.type("java.lang.reflect.Modifier");
+        var fs = SZo.getDeclaredFields(), bestM = null, bestI = null, bestPass = -1;
+        for (var i = 0; i < fs.length; i++) {
+            if (!Mod.isStatic(fs[i].getModifiers()) || !SZo.isAssignableFrom(fs[i].getType())) continue;
+            var inst; try { fs[i].setAccessible(true); inst = fs[i].get(null); } catch (e) { continue; }
+            if (inst == null) continue;
+            var c = _classOf(inst), seen = {};
+            while (c != null) {
+                var ms = c.getDeclaredMethods();
+                for (var j = 0; j < ms.length; j++) {
+                    var m = ms[j], mn = "" + m.getName(); if (seen[mn]) continue; seen[mn] = 1;
+                    if (m.getParameterCount() !== 2 || ("" + m.getReturnType().getName()) !== "boolean") continue;
+                    var ps = m.getParameterTypes();
+                    if (!ps[0].isAssignableFrom(dCls) || !ps[1].isAssignableFrom(uCls)) continue;
+                    m.setAccessible(true);
+                    var pass = 0;
+                    for (var k = 0; k < lim; k++) { try { if (m.invoke(inst, descs.get(k), uo1)) pass++; } catch (e) {} }
+                    if (pass > bestPass) { bestPass = pass; bestM = m; bestI = inst; }
+                }
+                c = c.getSuperclass();
+            }
+        }
+        _SZMETHOD = bestM; _SZFILTER = bestI;
+    } catch (e) {}
+}
+function _szPass(d, uo1) { return true; }  // TEMP: nI_-only
+function _descriptors(cwo) {
+    return _inv0(cwo, SYM.KRt);        // java.util.List<cxz_2>
+}
+// uo1.mX_() -> descriptor container, routed through the resolved name.
+function _mx(uo1) { return _invokeNoArg(uo1, SYM.mX_); }
+var _MCACHE = {};
+function _findMethod(cls, name, pcount, p1simple) {
+    var key = cls.getName() + "#" + name + "/" + pcount + "/" + (p1simple || "");
+    if (_MCACHE[key] !== undefined) return _MCACHE[key];
+    var c = cls, found = null;
+    while (c != null && found == null) {
+        var ms = c.getDeclaredMethods();
+        for (var i = 0; i < ms.length; i++) {
+            var m = ms[i];
+            if (("" + m.getName()) !== name || m.getParameterCount() !== pcount) continue;
+            if (p1simple) { var pt = m.getParameterTypes(); if (("" + pt[1].getSimpleName()) !== p1simple) continue; }
+            m.setAccessible(true); found = m; break;
+        }
+        c = c.getSuperclass();
+    }
+    _MCACHE[key] = found; return found;
+}
+function _inv0(obj, name) {                         // cached reflected no-arg call
+    var m = _findMethod(obj.getClass(), name, 0, null);
+    return (m == null) ? null : m.invoke(obj);
+}
+function _inv1(obj, name, a) {                      // cached reflected 1-arg call
+    var m = _findMethod(obj.getClass(), name, 1, null);
+    return (m == null) ? null : m.invoke(obj, a);
+}
+var _SZFILTER = null, _SZMETHOD = null, _SZRESOLVED = false;
+// Resolve Bitwig's serialize filter structurally from the SZo class: a static field holding
+// an SZo instance (a filter singleton) plus its (descriptor, parent)->boolean method. The
+// descriptor class + parent are the discriminators (param[0] accepts the descriptor, param[1]
+// accepts the parent), which picks the RIGHT filter among the SZo modes. No obfuscated member
+// names. Falls back to "include everything" if it cannot be resolved.
+function _resolveSzFilter(descriptor, uo1) {
+    _SZRESOLVED = true;
+    try {
+        var dCls = _classOf(descriptor), uCls = _classOf(uo1);
+        var SZo = Java.type(SYM.SZo).class, Mod = Java.type("java.lang.reflect.Modifier");
+        var fs = SZo.getDeclaredFields();
+        for (var i = 0; i < fs.length; i++) {
+            if (!Mod.isStatic(fs[i].getModifiers()) || !SZo.isAssignableFrom(fs[i].getType())) continue;
+            try { fs[i].setAccessible(true); var inst = fs[i].get(null); if (inst == null) continue; } catch (e) { continue; }
+            var c = _classOf(inst);
+            while (c != null) {
+                var ms = c.getDeclaredMethods();
+                for (var j = 0; j < ms.length; j++) {
+                    var m = ms[j]; if (m.getParameterCount() !== 2) continue;
+                    if (("" + m.getReturnType().getName()) !== "boolean") continue;
+                    var ps = m.getParameterTypes();
+                    if (!ps[0].isAssignableFrom(dCls) || !ps[1].isAssignableFrom(uCls)) continue;
+                    m.setAccessible(true); _SZFILTER = inst; _SZMETHOD = m; return;
+                }
+                c = c.getSuperclass();
+            }
+        }
+    } catch (e) {}
+}
+function _szPass(d, uo1) {                          // Bitwig's own serialize filter
+    if (!_SZRESOLVED) _resolveSzFilter(d, uo1);
+    if (_SZMETHOD == null) return true;            // unresolved -> include all (nI_ still gates)
+    try { return !!_SZMETHOD.invoke(_SZFILTER, d, uo1); } catch (e) { return true; }
 }
 function _relChildren(d, uo1) {                     // null if d is not a relationship
     var m = _findMethod(_classOf(d), SYM.uEK, 2, "String");
@@ -1384,10 +1507,11 @@ function _runResolverProbe() {
         report.capabilities.clip_create.detail += noteFound ? " | verified" : " | sentinel NOT found";
     }
 
-    // 4. serialize: Bitwig's own serializer turns the track document into bytes (SZo filter).
-    //    Used by track.serialize and underpins the descriptor reader's serialize filter.
+    // 4. serialize filter: the SZo serialize filter that the descriptor reader uses to decide
+    //    which properties are serialized. Resolve it structurally (SYM.SZo) and confirm it
+    //    classifies a real descriptor without error.
     try {
-        var SZo = Java.type("com.bitwig.ramona.serial.SZo");
+        var SZo = Java.type(SYM.SZo);                // class must load
         var bytes = byU.SWC(SZo.uEK);
         var nb = (bytes == null) ? 0 : bytes.length;
         report.capabilities.serialize.ok = nb > 0;
@@ -1653,28 +1777,6 @@ var HANDLERS = {
         } catch (e) {
             return { error: "" + e };
         }
-    },
-    // serialize the SELECTED track's internal object to bytes (Bitwig's own serializer, run in
-    // the document-edit context) -> stashed as base64; fetch with track.serialize_result. The
-    // parent reads it with ramona_serial to decode clips/notes (engine_playback_events) +
-    // automation. mode: "uEK" (default) or "SWC".
-    "track.serialize": function (p) {
-        gSerializeB64 = null; gSerializeErr = null;
-        var obj = cursorTrack.getDeepestTarget();
-        if (obj == null) return { error: "no track target (select a track first)" };
-        var mode = "" + (p.mode || "uEK");
-        _runOnDocumentThread(cursorTrack, function () {
-            try {
-                var SZo = Java.type("com.bitwig.ramona.serial.SZo");
-                var bytes = obj.SWC(mode === "SWC" ? SZo.SWC : SZo.uEK);
-                gSerializeB64 = "" + Java.type("java.util.Base64").getEncoder().encodeToString(bytes);
-                return { len: bytes.length };
-            } catch (e) { gSerializeErr = "" + e; return { error: "" + e }; }
-        });
-        return { queued: true, note: "fetch with track.serialize_result" };
-    },
-    "track.serialize_result": function (p) {
-        return { b64: gSerializeB64, error: gSerializeErr, ready: (gSerializeB64 != null || gSerializeErr != null) };
     },
     // generic in-process structured read of the SELECTED track's document graph (notes +
     // automation as real values). params: max_depth (default 12), max_nodes (default 6000).
@@ -2146,32 +2248,16 @@ var HANDLERS = {
     "tempo.write_offline": function (p) {
         var pts = p.points; if (!pts || !pts.length) return { error: "no points" };
         _runOnDocumentThread(cursorTrack, function () {
-            // tempo's atom lives on the transport / float_document - we resolve fj from
-            // the tempo parameter proxy.
+            // tempo's atom lives on the transport float_document. fj IS that document; its
+            // automation_lanes accessor + the value-ref factory + insert are the SAME cluster
+            // as track automation, so we reuse the structurally-discovered automation symbols
+            // (no obfuscated names): fj is byU (its lanes accessor yields the transport lanes).
             var tt = transport.tempo();
             var pp = tt.value ? tt.value() : tt;
             var fj = _fjFrom(_invokeNoArg(pp.getDeepestTarget(), "getAtom"));
             if (fj == null) fj = _fjFrom(pp.getDeepestTarget());
             if (fj == null) throw "could not resolve fj for tempo";
-            // fj IS the float_document that owns the tempo atom; its zer() returns
-            // the transport-level automation_lanes (same as automationWriteOffline
-            // does for track params, but sourced from the transport document, not
-            // the cursor track).
-            var al = _invokeNoArg(fj, "zer");
-            var a1x = Java.type("com.bitwig.flt.document.core.master.a1x").r3B(fj);
-            var oJk = Java.type("oJk"), LINEAR = oJk.Xzy, HOLD = oJk.r3B;
-            var Dbl = Java.type("java.lang.Double"), Bl = Java.type("java.lang.Boolean");
-            var m = _findAutomationInsert(al.getClass());
-            var n = 0;
-            for (var i = 0; i < pts.length; i++) {
-                var pt = pts[i];
-                var hasCurv = (pt.length > 2 && pt[2] != null);
-                var curv = hasCurv ? pt[2] : 0.0;
-                var interp = (pt.length > 3 && ("" + pt[3]) === "hold") ? HOLD : LINEAR;
-                m.invoke(al, a1x, Dbl.valueOf(pt[0]), Dbl.valueOf(pt[1]), Dbl.valueOf(curv),
-                         Bl.valueOf(hasCurv), Bl.FALSE, interp, null);
-                n++;
-            }
+            var n = _insertAutoDiscovered(fj, pp, pts);
             return { inserted: n, param: "tempo" };
         });
         return { queued: pts.length, note: "async; outcome in openwig_bridge.log [auto]" };
