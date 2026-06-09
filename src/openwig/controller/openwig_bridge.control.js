@@ -708,6 +708,37 @@ function _hasExec(rt, byUClass, ListC) {
 // Find command hosts for a SET of op-ids in a single jar pass (early-stops once all are
 // found). Returns { opid: {cls, field, factory, exec} }. `byUClass`, if given, requires the
 // command's exec to accept it as the first arg (narrows + speeds the clip-create case).
+// Does cls (hierarchy) declare a no-arg int/long/short getter? (a command exposes its op-id
+// through one). Used to pre-filter command candidates without depending on the reader's ngq.
+function _hasNumericNoArg(cls) {
+    var c = cls;
+    while (c != null) {
+        var ms = c.getDeclaredMethods();
+        for (var i = 0; i < ms.length; i++) {
+            if (ms[i].getParameterCount() !== 0) continue;
+            var rn = "" + ms[i].getReturnType().getName();
+            if (rn === "int" || rn === "long" || rn === "short") return true;
+        }
+        c = c.getSuperclass();
+    }
+    return false;
+}
+// Scan a command's no-arg int/long getters; return the first value that is in `want`, else null.
+function _cmdMatchOpId(cmd, want) {
+    var c = _classOf(cmd), seen = {};
+    while (c != null) {
+        var ms = c.getDeclaredMethods();
+        for (var i = 0; i < ms.length; i++) {
+            var m = ms[i]; if (m.getParameterCount() !== 0) continue;
+            var rn = "" + m.getReturnType().getName();
+            if (rn !== "int" && rn !== "long" && rn !== "short") continue;
+            var nm = "" + m.getName(); if (seen[nm]) continue; seen[nm] = 1;
+            try { m.setAccessible(true); var id = "" + m.invoke(cmd); if (want[id]) return id; } catch (e) {}
+        }
+        c = c.getSuperclass();
+    }
+    return null;
+}
 function _findCommandsByOpIds(opids, byUClass) {
     var names = _jarDefaultPkgClasses();
     var Class = Java.type("java.lang.Class"), Mod = Java.type("java.lang.reflect.Modifier");
@@ -727,15 +758,15 @@ function _findCommandsByOpIds(opids, byUClass) {
                     var M = tms[m]; if (M.getParameterCount() !== 0) continue;
                     var mn = "" + M.getName(); if (seenM[mn]) continue; seenM[mn] = 1;
                     var RT = M.getReturnType(); if (RT.isPrimitive() || RT.isArray()) continue;
-                    if (!_hasNoArgNamed(RT, SYM.ngq)) continue;          // command exposes a prop/op id
+                    if (!_hasNumericNoArg(RT)) continue;                 // command exposes a numeric op-id
                     var execName = _hasExec(RT, byUClass, ListC); if (execName == null) continue;
                     try {
                         fields[f].setAccessible(true);
                         var val = fields[f].get(null); if (val == null) continue;
                         M.setAccessible(true); var cmd = M.invoke(val); if (cmd == null) continue;
                         _gCmdScanInstantiated++;
-                        var id = "" + _invokeNoArg(cmd, SYM.ngq);
-                        if (want[id] && !found[id]) {
+                        var id = _cmdMatchOpId(cmd, want);
+                        if (id != null && !found[id]) {
                             found[id] = { cls: names[i], field: "" + fields[f].getName(), factory: mn, exec: execName };
                             remaining--;
                         }
@@ -1145,25 +1176,27 @@ function _discoverReader(uo1, sentinels) {
             return { mX_: "mX_", KRt: "KRt", bf: "bf", ngq: scwo ? _selectNgq(scwo, "KRt", ["ngq"]) : "ngq", nI_: "nI_", Xzy: "Xzy", uEK: "uEK" };
         }
     }
-    // otherwise (blind, or a build where the seed names changed): first structural candidate
-    // whose walk surfaces a sentinel (validated by execution against the data we just wrote).
-    var cands = _readerCandidates(uo1);
+    // otherwise (blind, or a build where the seed names changed): among the structural
+    // candidates whose walk surfaces a sentinel, pick the RICHEST (most scalars). The richest
+    // walk is the most COMPLETE reader (reaches notes + automation), matching the canonical
+    // reader instead of a partial alias.
+    var cands = _readerCandidates(uo1), _bestN = null, _bestXzy = null, _bestScalars = -1, _bestHits = -1;
     for (var ci = 0; ci < cands.length; ci++) {
         var N = cands[ci];
         for (var xi = 0; xi < N.xzyOpts.length; xi++) {
             var xzy = N.xzyOpts[xi], sink = [], budget = { n: 9000 };
             try { _walkWith(uo1, N, xzy, 0, 16, budget, sink, {}); } catch (e) { continue; }
-            var blob = sink.join("");
-            var hit = false;
-            for (var s = 0; s < sentinels.length; s++) if (blob.indexOf(sentinels[s]) >= 0) { hit = true; break; }
-            if (hit) {
-                var cwoN; try { cwoN = _invokeNoArg(uo1, N.mX_); } catch (e) { cwoN = null; }
-                var ngq = cwoN ? _selectNgq(cwoN, N.KRt, N.ngqOpts) : (N.ngqOpts[0] || null);
-                return { mX_: N.mX_, KRt: N.KRt, bf: N.bf, ngq: ngq, nI_: N.nI_, Xzy: xzy, uEK: N.uEK };
+            var blob = sink.join(""), nhit = 0;
+            for (var s = 0; s < sentinels.length; s++) if (blob.indexOf(sentinels[s]) >= 0) nhit++;
+            if (nhit > 0 && (nhit > _bestHits || (nhit === _bestHits && sink.length > _bestScalars))) {
+                _bestHits = nhit; _bestScalars = sink.length; _bestN = N; _bestXzy = xzy;
             }
         }
     }
-    return null;
+    if (_bestN == null) return null;
+    var cwoN; try { cwoN = _invokeNoArg(uo1, _bestN.mX_); } catch (e) { cwoN = null; }
+    var ngq = cwoN ? _selectNgq(cwoN, _bestN.KRt, _bestN.ngqOpts) : (_bestN.ngqOpts[0] || null);
+    return { mX_: _bestN.mX_, KRt: _bestN.KRt, bf: _bestN.bf, ngq: ngq, nI_: _bestN.nI_, Xzy: _bestXzy, uEK: _bestN.uEK };
 }
 
 // ── symbol cache: doctor resolves + validates the reader names, persists them keyed by a
@@ -1303,17 +1336,9 @@ function _runResolverProbe() {
         report.capabilities.automation_write.via = r.via;
     } catch (e) { report.capabilities.automation_write.detail = "insert failed: " + e; }
 
-    // 1.5 discover the descriptor-reader names, validated by the automation sentinel just
-    //     written (the note sentinel does not exist yet). Apply into SYM so everything below
-    //     (command op-id lookup via SYM.ngq, descriptor read) uses the RESOLVED reader.
-    var rd = null;
-    try { rd = _discoverReader(byU, ["1.414213", "2.236067"]); }
-    catch (e) { report.reader_err = "" + e; }
-    if (rd) { _applyReaderNames(rd); report.reader = rd; }
-
-    // 1.7 resolve the clip-create + note-insert command hosts by stable op-id (jar scan;
-    //     doctor-only). Uses SYM.ngq (just resolved) to read each command's op-id. Skipped in
-    //     blind mode. On success SYM.clipCmd/noteCmd point at the resolved classes.
+    // 1.5 resolve the clip-create + note-insert command hosts by stable op-id (jar scan,
+    //     doctor-only, self-contained: reads each command's numeric op-id directly, no reader
+    //     dependency). Skipped in blind mode. On success SYM.clipCmd/noteCmd are resolved.
     if (!gBlindDiscovery) {
         try {
             var got = _findCommandsByOpIds([SYM.clipCmd.opid, SYM.noteCmd.opid], null);
@@ -1330,6 +1355,14 @@ function _runResolverProbe() {
         var c = _insertClip(byU, 0.0, 4.0, [[0, _SENT_NOTE_KEY, _SENT_NOTE_START, 0.5, _SENT_NOTE_VEL]]);
         report.capabilities.clip_create.detail = "created clip, " + c.notes + " note(s)";
     } catch (e) { report.capabilities.clip_create.detail = "create failed: " + e; }
+
+    // 2.5 discover the descriptor reader now that BOTH the automation point and the clip note
+    //     are written, so it is validated against automation AND notes (a COMPLETE reader, not
+    //     a partial alias). Apply into SYM for the descriptor read below.
+    var rd = null;
+    try { rd = _discoverReader(byU, ["1.414213", "2.236067", "1.618033", "0.6789"]); }
+    catch (e) { report.reader_err = "" + e; }
+    if (rd) { _applyReaderNames(rd); report.reader = rd; }
 
     // 3. descriptor read-back + sentinel verification
     var json = null;
