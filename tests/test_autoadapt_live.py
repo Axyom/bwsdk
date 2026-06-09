@@ -1,0 +1,153 @@
+"""Live auto-adaptability tests (opt-in, marked `live`).
+
+These verify, against a REAL running Bitwig, that the resolver still resolves Bitwig's
+obfuscated internals at runtime: it can write arranger automation, create clips, read the
+document descriptor, serialize, and normalize, with and without name seeds (blind mode),
+and that a normal probe writes a build-keyed symbol cache.
+
+They are skipped unless OPENWIG_LIVE=1 (see conftest.pytest_collection_modifyitems), so a
+normal `pytest` run never touches the live Bitwig.
+
+Each test stands up a throwaway probe track by INDEX-DIFF (mirroring
+diagnostics.run_selftest): snapshot the occupied indices, create an instrument track, poll
+state.snapshot until a NEW occupied slot appears, select it, run the probe, then in a
+finally delete every slot that appeared (covers a failed post-create rename), highest index
+first so earlier indices stay valid.
+"""
+import time
+
+import pytest
+
+PROBE_TRACK = "__openwig_probe_test__"
+
+
+def _occupied(b):
+    """Set of main-track indices currently occupied (by name; the exists flag is flaky)."""
+    snap = b.request("state.snapshot")
+    return {t.get("index") for t in snap.get("tracks", []) if t.get("name")}
+
+
+def _make_probe_track(b):
+    """Create + select a throwaway instrument track, returning (selected_index, before_set).
+
+    Raises AssertionError if the new slot never appears. The caller is responsible for
+    cleaning up via _cleanup_probe_tracks(b, before) in a finally.
+    """
+    before = _occupied(b)
+    b.request("track.create", {"type": "instrument", "name": PROBE_TRACK})
+    idx = None
+    for _ in range(16):
+        time.sleep(0.25)
+        new_indices = sorted(_occupied(b) - before)
+        if new_indices:
+            idx = new_indices[-1]
+            break
+    assert idx is not None, "probe track did not appear (cannot run round-trip)"
+    b.request("track.select", {"index": idx})
+    time.sleep(0.3)
+    return idx, before
+
+
+def _cleanup_probe_tracks(b, before):
+    """Delete every slot that appeared since `before`, highest index first."""
+    try:
+        appeared = sorted(_occupied(b) - before, reverse=True)
+    except Exception:  # noqa: BLE001 - cleanup must never mask the test result
+        return
+    for idx in appeared:
+        try:
+            b.request("track.delete", {"index": idx})
+        except Exception:  # noqa: BLE001
+            pass
+
+
+pytestmark = pytest.mark.live
+
+
+def test_probe_normal_resolves_and_verifies(live_bridge):
+    """A normal (name-seeded) probe resolves and verifies every reflection path."""
+    b = live_bridge
+    _, before = _make_probe_track(b)
+    try:
+        b.request_op("resolver.probe", {"blind": False}, timeout=90)
+        res = b.request("resolver.result", timeout=10)
+        report = res.get("report")
+        assert report is not None, f"no probe report (error={res.get('error')!r})"
+
+        assert report.get("ok") is True, f"report not ok: {report}"
+
+        caps = report["capabilities"]
+        for name in ("automation_write", "clip_create", "descriptor_read",
+                     "serialize", "normalize"):
+            assert caps[name]["ok"] is True, f"capability {name} failed: {caps[name]}"
+
+        reader = report.get("reader")
+        assert reader is not None, "normal probe did not resolve the descriptor reader"
+        assert set(reader.keys()) == {"mX_", "KRt", "bf", "ngq", "nI_", "Xzy", "uEK"}, (
+            f"reader keys unexpected: {sorted(reader.keys())}"
+        )
+
+        commands = report.get("commands")
+        assert commands is not None, "normal probe did not resolve commands"
+        assert commands.get("resolved") is True, f"commands not resolved: {commands}"
+        for cmd in ("clipCmd", "noteCmd"):
+            spec = commands[cmd]
+            for field in ("cls", "field", "factory", "exec"):
+                assert spec.get(field), f"commands.{cmd} missing {field}: {spec}"
+    finally:
+        _cleanup_probe_tracks(b, before)
+
+
+def test_probe_blind_discovers_structurally(live_bridge):
+    """Blind mode resolves reader + automation + clip with NO name seeds, and does not cache."""
+    b = live_bridge
+    _, before = _make_probe_track(b)
+    try:
+        b.request_op("resolver.probe", {"blind": True}, timeout=120)
+        res = b.request("resolver.result", timeout=10)
+        report = res.get("report")
+        assert report is not None, f"no blind probe report (error={res.get('error')!r})"
+
+        caps = report["capabilities"]
+        assert caps["automation_write"]["ok"] is True, (
+            f"blind automation_write failed: {caps['automation_write']}"
+        )
+        assert caps["descriptor_read"]["ok"] is True, (
+            f"blind descriptor_read failed: {caps['descriptor_read']}"
+        )
+        assert caps["clip_create"]["ok"] is True, (
+            f"blind clip_create failed: {caps['clip_create']}"
+        )
+
+        # blind discovery intentionally does NOT write the symbol cache.
+        cache = report.get("cache")
+        assert cache is not None, "blind probe report missing cache block"
+        assert cache.get("written") is False, f"blind probe must not cache: {cache}"
+    finally:
+        _cleanup_probe_tracks(b, before)
+
+
+def test_cache_roundtrip(live_bridge):
+    """After a normal probe, resolver.status reflects a discovered/cached, matching cache."""
+    b = live_bridge
+    _, before = _make_probe_track(b)
+    try:
+        b.request_op("resolver.probe", {"blind": False}, timeout=90)
+        res = b.request("resolver.result", timeout=10)
+        report = res.get("report")
+        assert report is not None, f"no probe report (error={res.get('error')!r})"
+        assert report.get("ok") is True, f"probe not ok before status check: {report}"
+
+        status = b.request("resolver.status", timeout=10)
+        src = (status.get("symbol_source") or "").lower()
+        assert "discover" in src or "cache" in src, f"unexpected symbol_source: {status}"
+        assert status.get("cache_exists") is True, f"cache_exists false: {status}"
+        assert status.get("cache_matches") is True, f"cache_matches false: {status}"
+
+        reader = status.get("reader") or {}
+        assert reader, "resolver.status reader dict is empty"
+        assert all(reader.get(k) for k in ("mX_", "KRt", "bf", "ngq", "nI_", "Xzy", "uEK")), (
+            f"resolver.status reader not fully populated: {reader}"
+        )
+    finally:
+        _cleanup_probe_tracks(b, before)
