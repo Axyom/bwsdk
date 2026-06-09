@@ -277,27 +277,6 @@ class Track:
                          {"track": self.idx, "slot": int(slot), "path": str(path)})
         time.sleep(0.5); return self
 
-    def audio_clip(self, path, start=0.0, duration=4.0):
-        """Drop a .wav/.aiff onto the arranger at `start` (beats) with `duration`
-        (beats). Works the same way Bitwig's drag-drop from the browser does-
-        ArrangerClipInsertionPoint.r3B(File, ZjS.r3B, null). Path discovered from
-        the public InsertionPoint class in com/bitwig/flt/document/core/iface/clipboard.
-
-        Sleeps 1.5s after the call: Bitwig's audio loader decodes the file off the
-        GraalJS thread but back-to-back inserts can saturate the controller's queue
-        and crash the bridge (observed). 1.5s gives the loader breathing room."""
-        self.s.b.request("track.insert_audio_clip", {
-            "track": self.idx, "path": str(path),
-            "start": float(start), "duration": float(duration),
-        })
-        time.sleep(1.5); return self
-
-    def audio_clips(self, segments):
-        """Lay several audio clips: [(path, start, duration), ...]."""
-        for (path, start, dur) in segments:
-            self.audio_clip(path, start=start, duration=dur)
-        return self
-
     def describe_clip(self):
         """Enumerate every descriptor of the currently-selected clip
         (property IDs + current values). Used to discover stretch / loop / etc.

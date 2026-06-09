@@ -1400,21 +1400,18 @@ function _hostInfo() {
     return out;
 }
 
-// Every obfuscated class literal the reflection paths load via Java.type. A renamed class
-// here is the cheapest possible breakage signal: the load just throws. Grouped by feature.
-var _RESOLVER_CLASSES = [
-    "fj",                                          // automation: document automatable-value base
-    "oJk",                                         // automation: interpolation enum (LINEAR/HOLD)
-    "com.bitwig.flt.document.core.master.a1x",     // automation: value-ref identity a1x.r3B(fj)
-    "X2S",                                         // clip-create: command host
-    "alU",                                         // clip-create: insert-note command host
-    "com.bitwig.ramona.serial.SZo",                // descriptor reader + serialize filter
-    "ZjS"                                          // audio-clip / file insert dispatch token
-];
+// Verify the obfuscated classes the bridge actually depends on still load - derived from the
+// RESOLVED symbols (SYM + the discovered automation cluster), not a hardcoded list, so this
+// reflects whatever was discovered/cached for this build. A renamed-and-unresolved class
+// shows up here as failing to load.
 function _resolverClasses() {
-    var out = {};
-    for (var i = 0; i < _RESOLVER_CLASSES.length; i++) {
-        var nm = _RESOLVER_CLASSES[i];
+    var out = {}, names = [SYM.fj, SYM.SZo];
+    if (SYM.clipCmd && SYM.clipCmd.cls) names.push(SYM.clipCmd.cls);
+    if (SYM.noteCmd && SYM.noteCmd.cls) names.push(SYM.noteCmd.cls);
+    if (_AUTO_SYM) { try { names.push("" + _AUTO_SYM.avr.getName()); } catch (e) {}
+                     try { names.push("" + _AUTO_SYM.interp.getName()); } catch (e) {} }
+    for (var i = 0; i < names.length; i++) {
+        var nm = names[i]; if (nm == null || out[nm] !== undefined) continue;
         try { Java.type(nm); out[nm] = true; } catch (e) { out[nm] = false; }
     }
     return out;
@@ -2186,48 +2183,6 @@ var HANDLERS = {
                 || application.getAction("Browse Modulators");
         if (a != null) { a.invoke(); return { ok: true, action: "" + a.getName() }; }
         return { ok: false, error: "no insert-modulator action found" };
-    },
-
-    // INSERT an audio clip from a .wav file onto the arranger at `start` (beats),
-    // duration `dur` beats, via the stable ArrangerClipInsertionPoint:
-    //   ArrangerClipInsertionPoint(HrV track, double startTime, double duration,
-    //                              FSY=null, clk_2=null)
-    //   .r3B(new File(path), ZjS.r3B, null)
-    // (HrV is the track-document interface; byU implements it. byi_2.r3B(File, ZjS, hha)
-    // at byi_2.java:130 is the base file dispatcher; both FSY and hha are nullable.)
-    // p: { track: N, path: "...wav", start: beat, duration?: beat }
-    "track.insert_audio_clip": function (p) {
-        var trackIdx = bget(p, "track", 0) | 0;
-        var path = "" + bget(p, "path", "");
-        var start = Number(bget(p, "start", 0));
-        var dur = Number(bget(p, "duration", 4));
-        if (!path) return { error: "no path" };
-        _runOnDocumentThread(cursorTrack, function () {
-            var t = trackBank.getItemAt(trackIdx);
-            var trackDoc = t.getDeepestTarget();
-            if (trackDoc == null) throw "track " + trackIdx + " has no document target";
-            // byU implements OkP() -> HrV (synthetic); the real accessor is TD() which
-            // returns a `miV` that IS-A HrV. Use it.
-            var trackAsHrV = _inv0(trackDoc, "TD");
-            if (trackAsHrV == null) throw "trackDoc.TD() returned null";
-            var ACIP = Java.type("com.bitwig.flt.document.core.iface.clipboard.clip.ArrangerClipInsertionPoint");
-            // pick the 5-arg constructor: (HrV, double, double, FSY, clk_2)
-            var ctors = ACIP.class.getDeclaredConstructors();
-            var ctor = null;
-            for (var i = 0; i < ctors.length; i++) {
-                if (ctors[i].getParameterCount() === 5) { ctor = ctors[i]; break; }
-            }
-            if (ctor == null) throw "ArrangerClipInsertionPoint 5-arg ctor not found";
-            ctor.setAccessible(true);
-            var Dbl = Java.type("java.lang.Double");
-            var aip = ctor.newInstance(trackAsHrV, Dbl.valueOf(start), Dbl.valueOf(dur), null, null);
-            var File = Java.type("java.io.File");
-            var ZjS = Java.type("ZjS");
-            var ok = aip.r3B(new File(path), ZjS.r3B, null);
-            return { dispatched: !!ok, path: path, start: start, duration: dur };
-        });
-        return { queued: true, path: path, start: start, duration: dur,
-                 note: "async; outcome in openwig_bridge.log [auto]" };
     },
 
     // ── routing introspection (SETTING routing is API-blocked + cxu_2 has no

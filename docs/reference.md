@@ -76,8 +76,6 @@ them at the end of a chain, not in the middle.
 | `t.clips(segments)` | Multiple arranger clips. `segments`: `[(start, dur, notes), ...]`. |
 | `t.scene(slot, notes, dur, step_size)` | Launcher clip in slot `slot`. |
 | `t.launch(slot)` | Launch launcher slot. |
-| `t.audio_clip(path, start, duration)` | Drop a `.wav`/`.aiff` onto the arranger. |
-| `t.audio_clips(segments)` | Multiple audio clips: `[(path, start, dur), ...]`. |
 | `t.sample(path, slot)` | Load audio into a launcher slot (audio tracks). |
 | `t.transpose_cursor(semitones)` | Transpose the selected clip. |
 | `t.quantize_cursor(amount)` | Quantize the selected clip's notes (`0..1`). |
