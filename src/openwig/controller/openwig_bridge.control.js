@@ -417,10 +417,12 @@ function sendObj(obj) {
 // The only methods allowed before that are the ones `openwig doctor` itself needs to probe
 // and validate the build, plus basic connectivity - so doctor can break the chicken-and-egg.
 function _symbolsValidated() { return gSymSource === "cache" || gSymSource === "discovered+cached"; }
+// Public-API methods (e.g. track.insert_audio_clip) are NOT here: they stay gated. Doctor
+// reaches the audio-insert reflection path via the resolver.audio_probe_insert alias instead.
 var _DOCTOR_METHODS = {
     "ping": true, "hello": true, "ops.done": true, "host.version": true, "state.snapshot": true,
     "track.create": true, "track.select": true, "track.delete": true,
-    "obj.walk": true, "obj.walk_result": true, "track.insert_audio_clip": true
+    "obj.walk": true, "obj.walk_result": true
 };
 function _gateAllows(method) {
     return _symbolsValidated() || method.indexOf("resolver.") === 0 || _DOCTOR_METHODS[method] === true;
@@ -1063,6 +1065,22 @@ function _insertAudioClip(byU, path, start, dur, hrvName) {
     var ok = P.dispatch.invoke(aip, new File(path), P.mode, null);
     return { dispatched: !!ok };
 }
+// Shared body for the public `track.insert_audio_clip` op and doctor's gate-exempt
+// `resolver.audio_probe_insert` alias (so the public op stays gated like any reflection-
+// dependent mutation, while doctor can still validate the path on its throwaway track).
+function _audioInsertHandler(p) {
+    var trackIdx = bget(p, "track", 0) | 0;
+    var path = "" + bget(p, "path", "");
+    var start = Number(bget(p, "start", 0)), dur = Number(bget(p, "duration", 4));
+    var hrvOverride = p.hrv ? ("" + p.hrv) : null;
+    if (!path) return { error: "no path" };
+    _runOnDocumentThread(cursorTrack, function () {
+        var trackDoc = trackBank.getItemAt(trackIdx).getDeepestTarget();
+        if (trackDoc == null) throw "track " + trackIdx + " has no document target";
+        return _insertAudioClip(trackDoc, path, start, dur, hrvOverride);
+    });
+    return { queued: true, path: path, note: "async; outcome in openwig_bridge.log [auto]" };
+}
 
 function _clipCreateAndFill(p) {
     var start = Number(p.start || 0), dur = Number(p.duration || 4);
@@ -1534,19 +1552,10 @@ var HANDLERS = {
     // arranger audio-clip insert. SYM.audio.hrv (data/cache/validated) names the track-as-HrV
     // accessor; p.hrv overrides it (used by doctor to validate candidates). dispatch/ZjS/mode
     // resolve structurally from the stable ArrangerClipInsertionPoint.
-    "track.insert_audio_clip": function (p) {
-        var trackIdx = bget(p, "track", 0) | 0;
-        var path = "" + bget(p, "path", "");
-        var start = Number(bget(p, "start", 0)), dur = Number(bget(p, "duration", 4));
-        var hrvOverride = p.hrv ? ("" + p.hrv) : null;
-        if (!path) return { error: "no path" };
-        _runOnDocumentThread(cursorTrack, function () {
-            var trackDoc = trackBank.getItemAt(trackIdx).getDeepestTarget();
-            if (trackDoc == null) throw "track " + trackIdx + " has no document target";
-            return _insertAudioClip(trackDoc, path, start, dur, hrvOverride);
-        });
-        return { queued: true, path: path, note: "async; outcome in openwig_bridge.log [auto]" };
-    },
+    "track.insert_audio_clip": _audioInsertHandler,
+    // doctor-only alias: same insert, but under the gate-exempt resolver.* prefix so the audio
+    // reflection path can be validated on a throwaway track BEFORE symbols are validated.
+    "resolver.audio_probe_insert": _audioInsertHandler,
     // doctor: candidate track-as-HrV accessor names for the SELECTED track (+ resolved parts),
     // so the SDK can validate each by inserting a test wav. Select a track first.
     "resolver.audio_candidates": function () {

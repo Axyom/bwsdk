@@ -73,7 +73,9 @@ def _validate_audio(b, idx):
         params = {"track": idx, "path": str(wavp)}
         if hrv:
             params["hrv"] = hrv
-        b.request("track.insert_audio_clip", params)
+        # gate-exempt alias: doctor validates this path before symbols are validated, so it
+        # cannot use the (gated) public track.insert_audio_clip op.
+        b.request("resolver.audio_probe_insert", params)
         time.sleep(2.5)  # audio decode is async/off-thread
         if marker in walk_text():
             if hrv:
