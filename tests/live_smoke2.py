@@ -30,9 +30,6 @@ def main():
     bass = s.track("BASS", device="FM-4")
     bass.clip([(33, beat, 0.4, 0.85) for beat in range(s.total)])
 
-    # sidechain (KICK -> BASS)
-    step("Track.sidechain_from", lambda: bass.sidechain_from(kick))
-
     # tempo automation + markers + transport
     step("Song.automate_tempo",
          lambda: s.automate_tempo([(0, 128), (8, 140)]))

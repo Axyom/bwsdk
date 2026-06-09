@@ -1283,8 +1283,7 @@ var _RESOLVER_CLASSES = [
     "X2S",                                         // clip-create: command host
     "alU",                                         // clip-create: insert-note command host
     "com.bitwig.ramona.serial.SZo",                // descriptor reader + serialize filter
-    "ZjS",                                         // audio-clip / file insert dispatch token
-    "BOg"                                          // sidechain routing component base
+    "ZjS"                                          // audio-clip / file insert dispatch token
 ];
 function _resolverClasses() {
     var out = {};
@@ -2124,138 +2123,6 @@ var HANDLERS = {
         });
         return { queued: true, path: path, start: start, duration: dur,
                  note: "async; outcome in openwig_bridge.log [auto]" };
-    },
-
-    // SIDECHAIN: wire cursorDevice's sidechain input from another track's signal.
-    //   p: { source_track: N }
-    // Path discovered via ModuleGraphTests.java::sidechainPushingLatency:
-    //   - sink device has a `tkG` component (extends BOg/bog_3) in its components list
-    //   - tkG.fCq() returns the source-selector (dML/dml_2)
-    //   - dML.r3B(QcL) sets the source. QcL = a device's audio output via GVZ.jB1().
-    // The source-track's FIRST device's audio output is used as the source signal
-    // (chain it back to read post-FX by picking last device instead).
-    "device.set_sidechain_source": function (p) {
-        var srcIdx = bget(p, "source_track", 0) | 0;
-        var srcDevIdx = bget(p, "source_device_index", 0) | 0;
-        _runOnDocumentThread(cursorTrack, function () {
-            var sink = cursorDevice.getDeepestTarget();
-            if (sink == null) throw "no cursor device target (select sink device first)";
-            // 1. find the BOg (sidechain routing) component on the sink device
-            var lxh = _inv0(sink, "kGL");
-            if (lxh == null) throw "device has no kGL()";
-            var ayb = _findMethod(lxh.getClass(), "AYB", 0, null);
-            ayb.setAccessible(true);
-            var components = ayb.invoke(lxh);
-            var BOg = Java.type("BOg");
-            var bog = null;
-            for (var i = 0; i < components.size(); i++) {
-                var ci = components.get(i);
-                if (BOg.class.isAssignableFrom(ci.getClass())) { bog = ci; break; }
-            }
-            if (bog == null) throw "sink device has no BOg/sidechain routing component";
-            // 2. get its source selector
-            var selector = _inv0(bog, "fCq");
-            if (selector == null) throw "BOg.fCq() returned null";
-
-            // 3. obtain a source QcL = source track's specific device's audio output.
-            //    createDeviceBank() is init-only, so reach the source device document
-            //    obj directly. trackBank.getItemAt(srcIdx).getDeepestTarget() gives us
-            //    the source track's runtime object.
-            var srcTrack = trackBank.getItemAt(srcIdx);
-            var srcTrackDoc = srcTrack.getDeepestTarget();
-            if (srcTrackDoc == null) throw "source track document not reachable";
-            // walk track -> device_chain (cxt_2 atom child) -> devices (cxs_2 list) -> [srcDevIdx]
-            function _atomChild(uo1, propId) {
-                var dl = _descriptors(uo1.mX_());
-                for (var i = 0; i < dl.size(); i++) {
-                    var d = dl.get(i);
-                    try { if (("" + _inv0(d, "ngq")) === ("" + propId)) {
-                        try { return _inv1(d, "uEK", uo1); } catch (e) {} } } catch (e) {}
-                }
-                return null;
-            }
-            function _listChildren(uo1, propId) {
-                var dl = _descriptors(uo1.mX_());
-                for (var i = 0; i < dl.size(); i++) {
-                    var d = dl.get(i);
-                    try { if (("" + _inv0(d, "ngq")) === ("" + propId)) {
-                        return _relChildren(d, uo1); } } catch (e) {}
-                }
-                return null;
-            }
-            // track has device_chain at prop 356 (confirmed via debug_source_walk)
-            var dchain = _atomChild(srcTrackDoc, 356);
-            if (dchain == null) throw "source track has no device_chain (prop 356)";
-            // walk dchain children for a cxs_2 list of devices; scan ALL list-relationships
-            // and pick the first whose first element has a jB1() method (= a device)
-            var devList = null, srcDevObj = null;
-            var dchainDescr = _descriptors(dchain.mX_());
-            for (var jj = 0; jj < dchainDescr.size(); jj++) {
-                var dd = dchainDescr.get(jj);
-                try {
-                    var kids = _relChildren(dd, dchain);
-                    if (kids != null && kids.size() > srcDevIdx) {
-                        var candidate = kids.get(srcDevIdx);
-                        // does it have jB1()?
-                        var hasJB1 = _findMethod(candidate.getClass(), "jB1", 0, null);
-                        if (hasJB1 != null) {
-                            devList = kids; srcDevObj = candidate; break;
-                        }
-                    }
-                } catch (e) {}
-            }
-            if (srcDevObj == null) throw "no device with jB1() at index " + srcDevIdx + " on source track";
-            var srcQcL = _inv0(srcDevObj, "jB1");
-            if (srcQcL == null) throw "source device jB1() returned null (no audio output)";
-
-            // 4. wire selector -> source. dml_2 has multiple r3B overloads (QcL, Object,
-            // boolean...). Pick the one whose parameter type is assignable from srcQcL's
-            // class.
-            var setM = null;
-            var ms = selector.getClass().getMethods();
-            for (var k = 0; k < ms.length; k++) {
-                if (("" + ms[k].getName()) === "r3B" && ms[k].getParameterCount() === 1) {
-                    var pt = ms[k].getParameterTypes()[0];
-                    if (pt.isAssignableFrom(srcQcL.getClass())) { setM = ms[k]; break; }
-                }
-            }
-            if (setM == null) throw "no compatible r3B setter on selector";
-            setM.setAccessible(true);
-            setM.invoke(selector, srcQcL);
-            return { wired: true, source_track: srcIdx, source_device: srcDevIdx };
-        });
-        return { queued: true, note: "async; outcome in openwig_bridge.log [auto]" };
-    },
-
-    "modulator.list_sources": function () {
-        // Read the device's modulation_sources list via internals (prop 5438).
-        // Returns one entry per source with its display name (via hf() - found
-        // by enumerating String-returning methods on the source instance).
-        var byU = cursorDevice.getDeepestTarget();
-        if (byU == null) return { error: "no cursor device target" };
-        var cwo = byU.mX_();
-        var descrs = _descriptors(cwo);
-        var modList = null;
-        for (var i = 0; i < descrs.size(); i++) {
-            var d = descrs.get(i);
-            try {
-                if (("" + _inv0(d, "ngq")) === "5438") { modList = _relChildren(d, byU); break; }
-            } catch (e) {}
-        }
-        if (modList == null) return [];
-        var out = [];
-        for (var j = 0; j < modList.size(); j++) {
-            var s = modList.get(j);
-            var info = { index: j, name: "?", id: "?" };
-            try { info.name = "" + _inv0(s, "hf"); } catch (e) {}     // display name
-            try { info.id   = "" + _inv0(s, "cB_"); } catch (e) {}    // internal code
-            // fallback: blank display name -> use the id (e.g. "LFO", "RANDOM")
-            if (!info.name || info.name === "null" || info.name === "" || info.name === "?") {
-                info.name = info.id;
-            }
-            out.push(info);
-        }
-        return out;
     },
 
     // ── routing introspection (SETTING routing is API-blocked + cxu_2 has no

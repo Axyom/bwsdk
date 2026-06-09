@@ -360,28 +360,6 @@ class Track:
             self.s.b.request("device.set_remote", {"index": int(i), "value": float(v)}); time.sleep(0.03)
         return self
 
-    def sidechain_from(self, source_track, *, source_device_index=0, sink_device_index=None):
-        """Wire this track's sidechain-capable device (e.g. Compressor+, Gate+) to
-        listen to `source_track`'s signal. `source_device_index` picks which device
-        on the source track provides the signal (0 = first / often the instrument).
-        `sink_device_index` selects which device on THIS track owns the sidechain
-        input (defaults to currently-selected device - set it first if needed).
-
-        Discovered via Bitwig's own ModuleGraphTests.java: each device has a `tkG`
-        component (extends BOg) with `fCq()` returning a dML source-selector;
-        dML.r3B(QcL) wires the source. Source QcL = source device's audio output
-        (GVZ.jB1()).
-        """
-        from_idx = source_track.idx if hasattr(source_track, "idx") else int(source_track)
-        self.select()
-        if sink_device_index is not None:
-            self.s.b.request("device.select_index", {"index": int(sink_device_index)})
-            time.sleep(0.3)
-        res = self.s.b.request("device.set_sidechain_source",
-                               {"source_track": int(from_idx),
-                                "source_device_index": int(source_device_index)})
-        time.sleep(0.8); return self
-
     def routing_info(self):
         """Read this track's routing state (input source flags). READ-ONLY - Bitwig's
         API + cxu_2 schema have no setters for input/output/sidechain routing today

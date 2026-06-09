@@ -107,5 +107,4 @@ them at the end of a chain, not in the middle.
 
 | Method | Description |
 |---|---|
-| `t.sidechain_from(source_track, source_device_index, sink_device_index)` | Wire a sidechain input (e.g. Compressor+ listening to the kick). Wires the currently-selected device; use `sink_device_index` to pick which one. |
 | `t.routing_info()` | Read current routing state (read-only). |
