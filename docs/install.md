@@ -19,7 +19,10 @@ python -m openwig install
 ```
 
 This copies the bundled `openwig_bridge.control.js` into Bitwig's controller
-scripts directory (`%USERPROFILE%\Documents\Bitwig Studio\Controller Scripts\`).
+scripts directory (`%USERPROFILE%\Documents\Bitwig Studio\Controller Scripts\`),
+and the bootstrap symbol mapping (`symbols_default.json`) into the openwig data
+dir (`%LOCALAPPDATA%\openwig\`). Both are required: the controller hardcodes no
+obfuscated names, so without the data file it cannot resolve anything.
 
 !!! tip "If install says the directory doesn't exist"
     Launch Bitwig Studio once (so it creates its user directory), then re-run.
@@ -51,13 +54,15 @@ controller dir : C:\Users\<you>\Documents\Bitwig Studio\Controller Scripts
 controller     : OK
 bridge :7777   : OK (Bitwig 6.0.6) compatible
 internals      : self-test on a throwaway track ...
-  classes      : 9/9 internal classes load
+  classes      : 4/4 internal classes load
   automation   : OK
   clip create  : OK
   descriptor   : OK
   serialize    : OK
   normalize    : OK
+  audio clip   : OK
   cache        : written -> ...\openwig\symbols_cache.json
+  symbol source: discovered+cached
   => all reflection paths verified on this Bitwig build
 ```
 
