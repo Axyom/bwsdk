@@ -45,6 +45,7 @@ var masterCursorDevice, masterRemotes, masterDeviceBank;
 var gWalk = null, gWalkErr = null;           // generic descriptor-graph reader result (JSON string)
 var gProbe = null, gProbeErr = null;         // resolver self-test report (JSON-able object); see resolver.probe
 var _AUTO_SYM = null;                         // cached structurally-discovered automation symbols
+var gPendingCache = null;                     // probe-validated cache awaiting the audio verdict (resolver.finalize)
 var gBlindDiscovery = false;                  // test switch: structural discovery only (no name hints, no fallback)
 // Resolved obfuscated-symbol table. NO obfuscated names are hardcoded here: it is populated
 // at init from the bootstrap DATA file (symbols_default.json, shipped + installed next to the
@@ -424,7 +425,7 @@ var _DOCTOR_METHODS = {
     "obj.walk": true, "obj.walk_result": true,
     "resolver.classes": true, "resolver.status": true, "resolver.probe": true,
     "resolver.result": true, "resolver.audio_candidates": true,
-    "resolver.audio_probe_insert": true, "resolver.set_audio_hrv": true
+    "resolver.audio_probe_insert": true, "resolver.finalize": true
 };
 function _gateAllows(method) {
     return _symbolsValidated() || _DOCTOR_METHODS[method] === true;
@@ -502,8 +503,16 @@ function _invokeNoArg(obj, name) {
 // fj = the document automatable-value base; reach it from a control-surface target. The fj
 // class name is resolved into SYM.fj (bootstrap seed, overwritten by doctor's cache and by
 // automation discovery), so this is not a hardcoded dependence.
+// The fj CLASS: the resolved name when it loads, else the class the automation discovery
+// derived structurally (the value-ref factory's parameter type) - a build that renamed fj
+// self-heals once any automation insert validated, and doctor persists the healed name.
+function _fjClass() {
+    if (SYM.fj) { try { return Java.type(SYM.fj).class; } catch (e) {} }
+    if (_AUTO_SYM && _AUTO_SYM.fjClass) return _AUTO_SYM.fjClass;
+    throw "fj class unresolved ('" + SYM.fj + "' does not load; run doctor to re-discover)";
+}
 function _fjFrom(obj) {
-    var fjC = Java.type(SYM.fj).class;
+    var fjC = _fjClass();
     if (obj != null && fjC.isInstance(obj)) return obj;
     var c = obj.getClass();
     while (c != null) {
@@ -1417,6 +1426,53 @@ function _walkTrackJSON(byU) {
     return JSON.stringify(_walkObj(byU, 0, 16, budget, opts));
 }
 
+// ── structural discovery of the serialize filter ────────────────────────────────
+// The filter singleton lives in the STABLE com.bitwig.ramona.serial package: a class with a
+// static SELF-typed field whose instance declares a 2-arg boolean method accepting (a
+// property descriptor, the document object). The shape is not unique (the holder class
+// carries several self-typed constants and overloads), so the caller validates candidates
+// behaviourally: the filtered walk must keep the just-written sentinels readable, and among
+// the survivors the most-filtering one (shortest walk) matches Bitwig's own serializer.
+function _discoverSzFilter(d0, uo1) {
+    var loc = host.getClass().getProtectionDomain().getCodeSource().getLocation();
+    var jarFile = new (Java.type("java.io.File"))(loc.toURI());
+    var zf = new (Java.type("java.util.zip.ZipFile"))(jarFile), en = zf.entries(), names = [];
+    var PKG = "com/bitwig/ramona/serial/";
+    while (en.hasMoreElements()) {
+        var n = "" + en.nextElement().getName();
+        if (n.indexOf(PKG) !== 0 || n.substring(n.length - 6) !== ".class" || n.indexOf("$") >= 0) continue;
+        names.push(n.substring(0, n.length - 6).replace(/\//g, "."));
+    }
+    zf.close();
+    var Mod = Java.type("java.lang.reflect.Modifier"), dCls = _classOf(d0), uCls = _classOf(uo1), out = [];
+    for (var i = 0; i < names.length; i++) {
+        var cls; try { cls = Java.type(names[i]).class; } catch (e) { continue; }
+        var fs; try { fs = cls.getDeclaredFields(); } catch (e) { continue; }
+        for (var f = 0; f < fs.length; f++) {
+            if (!Mod.isStatic(fs[f].getModifiers()) || !cls.isAssignableFrom(fs[f].getType())) continue;
+            var val; try { fs[f].setAccessible(true); val = fs[f].get(null); } catch (e) { continue; }
+            if (val == null) continue;
+            var c = _classOf(val), seen = {};
+            while (c != null) {
+                var ms = c.getDeclaredMethods();
+                for (var m = 0; m < ms.length; m++) {
+                    var M = ms[m]; if (M.getParameterCount() !== 2) continue;
+                    if (("" + M.getReturnType().getName()) !== "boolean") continue;
+                    var ps = M.getParameterTypes();
+                    var key = M.getName() + "#" + ps[0].getName() + "#" + ps[1].getName();
+                    if (seen[key]) continue; seen[key] = 1;
+                    if (!ps[0].isAssignableFrom(dCls) || !ps[1].isAssignableFrom(uCls)) continue;
+                    try { M.setAccessible(true); M.invoke(val, d0, uo1); } catch (e) { continue; }  // must invoke cleanly
+                    out.push({ SZo: names[i], field: "" + fs[f].getName(),
+                               method: "" + M.getName(), param: "" + ps[1].getSimpleName() });
+                }
+                c = c.getSuperclass();
+            }
+        }
+    }
+    return out;
+}
+
 // Runs on the document-edit thread (inside resolver.probe's exec). Mutates ONLY the
 // currently-selected track, which the caller has created as a throwaway and deletes after.
 function _runResolverProbe() {
@@ -1442,6 +1498,19 @@ function _runResolverProbe() {
         report.capabilities.automation_write.detail = "inserted " + r.inserted + " (" + r.via + ")";
         report.capabilities.automation_write.via = r.via;
     } catch (e) { report.capabilities.automation_write.detail = "insert failed: " + e; }
+
+    // 1.2 fj self-heal: the automation discovery derives the fj class structurally (the
+    //     value-ref factory's parameter type). If the resolved name no longer loads (a build
+    //     that renamed fj), adopt the discovered class name so the normalize/serialize steps
+    //     below, _fjFrom callers, and the cache all use the healed name.
+    if (!gBlindDiscovery && _AUTO_SYM && _AUTO_SYM.fjClass) {
+        var fjLoads = false;
+        if (SYM.fj) { try { Java.type(SYM.fj); fjLoads = true; } catch (e) {} }
+        if (!fjLoads) {
+            SYM.fj = "" + _AUTO_SYM.fjClass.getName();
+            report.healed = report.healed || {}; report.healed.fj = SYM.fj;
+        }
+    }
 
     // 1.5 resolve the clip-create + note-insert command hosts by stable op-id (jar scan,
     //     doctor-only, self-contained: reads each command's numeric op-id directly, no reader
@@ -1516,6 +1585,36 @@ function _runResolverProbe() {
         report.capabilities.serialize.detail = classified ? ("filter ok (" + SYM.szFilter.method + ")") : "filter not resolved";
     } catch (e) { report.capabilities.serialize.detail = "failed: " + e; }
 
+    // 4.5 serialize self-heal: when the seeded SZo/filter no longer resolves, re-discover it
+    //     structurally in the stable serial package and validate each candidate against the
+    //     sentinel walk. Requires a sentinel-verified reader (otherwise no ground truth).
+    if (!gBlindDiscovery && !report.capabilities.serialize.ok && json != null && (autoFound || noteFound)) {
+        try {
+            var cwoH = _mx(byU), dlH = _descriptors(cwoH);
+            if (dlH && dlH.size() > 0) {
+                var fCands = _discoverSzFilter(dlH.get(0), byU);
+                var prevSZo = SYM.SZo, prevFilt = SYM.szFilter, bestF = null, bestLen = -1;
+                for (var fc = 0; fc < fCands.length; fc++) {
+                    SYM.SZo = fCands[fc].SZo;
+                    SYM.szFilter = { field: fCands[fc].field, method: fCands[fc].method, param: fCands[fc].param };
+                    _SZFILT = null;
+                    var jf; try { jf = _walkTrackJSON(byU); } catch (e) { continue; }
+                    var aOk = !autoFound || jf.indexOf(_SENT_AUTO_S) >= 0 || jf.indexOf(_SENT_AUTO_S2) >= 0;
+                    var nOk = !noteFound || jf.indexOf(_SENT_NOTE_S) >= 0;
+                    if (aOk && nOk && (bestLen < 0 || jf.length < bestLen)) { bestLen = jf.length; bestF = fCands[fc]; }
+                }
+                if (bestF) {
+                    SYM.SZo = bestF.SZo;
+                    SYM.szFilter = { field: bestF.field, method: bestF.method, param: bestF.param };
+                    _SZFILT = null; _szPass(dlH.get(0), byU);
+                    report.capabilities.serialize.ok = (_SZFILT !== null && _SZFILT !== false);
+                    report.capabilities.serialize.detail = "discovered (" + bestF.SZo + "." + bestF.field + " / " + bestF.method + ")";
+                    report.healed = report.healed || {}; report.healed.szFilter = bestF;
+                } else { SYM.SZo = prevSZo; SYM.szFilter = prevFilt; _SZFILT = null; }
+            }
+        } catch (e) { report.serialize_heal_err = "" + e; }
+    }
+
     // 5. normalize: resolve a parameter's native->0..1 normalize fn (structural, behavioural).
     //    Underpins device.remote_normalize and exact automation/breakpoint value conversion.
     try {
@@ -1548,13 +1647,15 @@ function _runResolverProbe() {
                 caps.serialize.ok && caps.normalize.ok;
 
     // persist the validated symbols so the bridge can use them at read time (no cache in
-    // blind/test mode). Gated on the FULL self-test: a cache opens the mandatory-doctor gate
-    // for every op (this session and, via the fingerprint match, all future sessions), so it
-    // must only exist when every capability verified. The cache carries everything
-    // _applyMapping needs to reproduce a working session: reader, fj, SZo, szFilter,
-    // autoLanes (the discovered+validated lanes accessor), commands and audio.
+    // blind/test mode). The cache opens the mandatory-doctor gate for every op (this session
+    // and, via the fingerprint match, all future sessions), so it must only exist when EVERY
+    // capability verified - INCLUDING the audio insert, which the SDK validates after this
+    // probe (the decode is async/off-thread, unreachable from this synchronous run). Two
+    // phases: stash the candidate cache here; resolver.finalize writes it once doctor
+    // reports the audio verdict. The cache carries everything _applyMapping needs to
+    // reproduce a working session: reader, fj, SZo, szFilter, autoLanes, commands, audio.
     if (!gBlindDiscovery && rd && report.ok) {
-        var cacheObj = {
+        gPendingCache = {
             schema: _CACHE_SCHEMA, fingerprint: _fingerprint(), bitwig: report.bitwig,
             reader: rd, fj: SYM.fj, SZo: SYM.SZo, szFilter: SYM.szFilter,
             autoLanes: (_AUTO_SYM ? ("" + _AUTO_SYM.alAccessor) : SYM.autoLanes),
@@ -1562,14 +1663,15 @@ function _runResolverProbe() {
             verdicts: { automation: caps.automation_write.ok, clip: caps.clip_create.ok,
                         descriptor: caps.descriptor_read.ok, serialize: caps.serialize.ok, normalize: caps.normalize.ok }
         };
-        var wrote = _writeCache(cacheObj);
-        gSymSource = wrote ? "discovered+cached" : "discovered";
-        report.cache = { written: wrote, path: _cachePath(), fingerprint: cacheObj.fingerprint };
-        if (!wrote) report.cache.reason = "cache write FAILED (data dir not writable?) - the gate stays shut; see " + LOG_FILE;
+        report.cache = { written: false, pending: true, path: _cachePath(),
+                         fingerprint: gPendingCache.fingerprint,
+                         reason: "pending audio validation (resolver.finalize)" };
     } else {
+        gPendingCache = null;
         report.cache = { written: false, reason: gBlindDiscovery ? "blind mode" :
             (rd ? "self-test failed (cache withheld so the gate stays shut)" : "reader not discovered") };
     }
+    report.classes = _resolverClasses();   // recompute: reflect names healed during the probe
     report.symbol_source = gSymSource;
     _JAR_CLASSES = null;   // doctor-only data: free the (large) jar class-name list
     return report;
@@ -1608,12 +1710,27 @@ var HANDLERS = {
         return { hrv_candidates: cands, dispatch: "" + P.dispatch.getName(),
                  zjs: "" + P.dispatch.getParameterTypes()[1].getName() };
     },
-    // doctor: record the validated audio HrV accessor + refresh the cache with it.
-    "resolver.set_audio_hrv": function (p) {
-        SYM.audio.hrv = "" + bget(p, "hrv", SYM.audio.hrv);
-        var c = _readCache();
-        if (c) { c.audio = SYM.audio; _writeCache(c); }
-        return { ok: true, hrv: SYM.audio.hrv };
+    // doctor: report the audio verdict and (on success) write the cache the probe stashed.
+    // The cache opens the gate, so it only lands when EVERY capability - audio included -
+    // verified. params: { audio_ok: bool, hrv?: validated-accessor-override }.
+    "resolver.finalize": function (p) {
+        var audioOk = !!bget(p, "audio_ok", false);
+        if (p.hrv) SYM.audio.hrv = "" + p.hrv;       // adopt the accessor doctor validated
+        if (!gPendingCache)
+            return { written: false, reason: "no pending cache (self-test failed or probe not run)" };
+        if (!audioOk) {
+            gPendingCache = null;
+            return { written: false, reason: "audio validation failed (cache withheld so the gate stays shut)" };
+        }
+        gPendingCache.audio = SYM.audio;
+        gPendingCache.verdicts.audio = true;
+        var wrote = _writeCache(gPendingCache);
+        gSymSource = wrote ? "discovered+cached" : "discovered";
+        var out = { written: wrote, path: _cachePath(), fingerprint: gPendingCache.fingerprint,
+                    symbol_source: gSymSource };
+        if (!wrote) out.reason = "cache write FAILED (data dir not writable?) - the gate stays shut; see " + LOG_FILE;
+        gPendingCache = null;
+        return out;
     },
     // Where SYM's reader names came from this session (cache / seed) + the build fingerprint.
     "resolver.status": function () {

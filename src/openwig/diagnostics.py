@@ -66,9 +66,10 @@ def _validate_audio(b, idx):
         b.request("resolver.audio_probe_insert", params)
         time.sleep(2.5)  # audio decode is async/off-thread
         if marker in walk_text():
-            if hrv:
-                b.request("resolver.set_audio_hrv", {"hrv": hrv})
-            return {"ok": True, "hrv": hrv or "(default)", "detail": "inserted + read back"}
+            # hrv_override (a non-default accessor that validated) is handed to
+            # resolver.finalize, which adopts it and persists it with the cache.
+            return {"ok": True, "hrv": hrv or "(default)", "hrv_override": hrv,
+                    "detail": "inserted + read back"}
     return {"ok": False, "detail": "no HrV accessor produced a clip"}
 
 
@@ -168,6 +169,21 @@ def run_selftest(b=None, *, timeout=90.0):
             else:
                 report["audio"] = {"ok": False,
                                    "detail": "skipped (descriptor read not verified; read-back impossible)"}
+            # two-phase cache: the probe only STASHES the cache; it is written here, once the
+            # audio verdict is known, so the gate never opens with an unvalidated capability.
+            try:
+                fin_params = {"audio_ok": bool(report["audio"].get("ok"))}
+                if report["audio"].get("hrv_override"):
+                    fin_params["hrv"] = report["audio"]["hrv_override"]
+                fin = b.request("resolver.finalize", fin_params)
+            except BridgeError as exc:
+                fin = {"written": False, "reason": f"finalize failed ({exc})"}
+            # prefer the finalize verdict when a cache was pending; otherwise keep the
+            # probe's more specific reason (self-test failed / blind / reader missing).
+            if fin.get("written") or (report.get("cache") or {}).get("pending"):
+                report["cache"] = fin
+            if fin.get("symbol_source"):
+                report["symbol_source"] = fin["symbol_source"]
             return report
         finally:
             _cleanup_probe_tracks(b, before)

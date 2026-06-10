@@ -51,7 +51,7 @@ class FakeBridge:
 
     def __init__(self, *, connected=True, classes=None, probe_report=None,
                  probe_error=None, appear_after=0, seed_tracks=None,
-                 create_name=None, delete_raises=False):
+                 create_name=None, delete_raises=False, finalize_result=None):
         self.calls = []                       # [(method, params), ...] in order
         self.connected = connected
         self.classes = classes if classes is not None else {
@@ -62,6 +62,7 @@ class FakeBridge:
         self.tracks = list(seed_tracks or [])
         self.create_name = create_name        # if set, the appended track uses this name
         self.delete_raises = delete_raises    # track.delete raises BridgeError
+        self.finalize_result = finalize_result  # scripted resolver.finalize response
         self._pending_name = None             # name to append once it "appears"
         self._snap_polls = 0                  # counts post-create snapshot reads
         self._next_index = (max((t["index"] for t in self.tracks), default=-1) + 1)
@@ -97,6 +98,8 @@ class FakeBridge:
             return {}
         if method == "resolver.result":
             return {"report": self.probe_report, "error": self.probe_error}
+        if method == "resolver.finalize":
+            return dict(self.finalize_result or {})
         return {}
 
     def request_op(self, method, params=None, **_kw):
@@ -248,6 +251,41 @@ def test_selftest_no_report_falls_back_to_base_with_error():
     assert rep["connected"] is True
     assert rep["classes"] == {"Foo": True, "Bar": True}
     assert rep["error"] == "resolver blew up"
+
+
+# -- run_selftest: two-phase cache (probe stashes, finalize writes) -----------------
+
+def test_selftest_calls_finalize_with_the_audio_verdict():
+    # FakeBridge's walk returns "" so the audio read-back can never match: the
+    # finalize call must carry audio_ok=False.
+    b = FakeBridge(probe_report=dict(GOOD_REPORT))
+    run_selftest(b)
+    fins = [p for m, p in b.calls if m == "resolver.finalize"]
+    assert fins, "run_selftest did not call resolver.finalize"
+    assert fins[-1].get("audio_ok") is False
+
+
+def test_selftest_pending_cache_takes_the_finalize_verdict():
+    rep = dict(GOOD_REPORT)
+    rep["cache"] = {"written": False, "pending": True, "reason": "pending audio validation"}
+    b = FakeBridge(probe_report=rep,
+                   finalize_result={"written": True, "path": "/x/symbols_cache.json",
+                                    "symbol_source": "discovered+cached"})
+    out = run_selftest(b)
+    assert out["cache"]["written"] is True
+    assert out["symbol_source"] == "discovered+cached"
+
+
+def test_selftest_failed_probe_keeps_the_probe_cache_reason():
+    # no pending cache (self-test failed): the probe's specific reason must survive,
+    # not be overwritten by finalize's generic "no pending cache".
+    rep = dict(GOOD_REPORT)
+    rep["ok"] = False
+    rep["cache"] = {"written": False, "reason": "self-test failed (cache withheld so the gate stays shut)"}
+    b = FakeBridge(probe_report=rep,
+                   finalize_result={"written": False, "reason": "no pending cache"})
+    out = run_selftest(b)
+    assert out["cache"]["reason"].startswith("self-test failed")
 
 
 # -- _occupied ---------------------------------------------------------------------
