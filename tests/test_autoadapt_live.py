@@ -26,6 +26,7 @@ from openwig.diagnostics import (
     _create_probe_track,
     _occupied,
     _write_silent_wav,
+    run_selftest,
 )
 
 PROBE_TRACK = "__openwig_probe_test__"
@@ -140,9 +141,14 @@ def test_audio_clip_insert_resolves_and_reads_back(live_bridge):
     b = live_bridge
     idx, before = _make_probe_track(b)
     try:
-        # validate symbols for this build (opens the gate; mirrors `openwig doctor`)
+        # validate symbols for this build (mirrors `openwig doctor`). The probe only STASHES
+        # the cache; finalize writes it and opens the gate. audio_ok=True is a placeholder
+        # verdict here because this very test validates audio next: if the insert is actually
+        # broken, the walk assertion below fails, so nothing is taken on faith.
         b.request_op("resolver.probe", {"blind": False}, timeout=90)
         assert (b.request("resolver.result", timeout=10).get("report") or {}).get("ok") is True
+        fin = b.request("resolver.finalize", {"audio_ok": True})
+        assert fin.get("written") is True, f"finalize did not write the cache: {fin}"
 
         marker = "owtest_audio_%d" % os.getpid()
         wavp = Path(tempfile.gettempdir()) / (marker + ".wav")
@@ -164,26 +170,25 @@ def test_audio_clip_insert_resolves_and_reads_back(live_bridge):
 
 
 def test_cache_roundtrip(live_bridge):
-    """After a normal probe, resolver.status reflects a discovered/cached, matching cache."""
+    """The full doctor flow (probe + audio validation + finalize) writes a matching cache.
+
+    Drives the shipped run_selftest end to end (it creates and cleans its own probe track),
+    then asserts resolver.status reflects a discovered/cached, fingerprint-matching cache.
+    """
     b = live_bridge
-    _, before = _make_probe_track(b)
-    try:
-        b.request_op("resolver.probe", {"blind": False}, timeout=90)
-        res = b.request("resolver.result", timeout=10)
-        report = res.get("report")
-        assert report is not None, f"no probe report (error={res.get('error')!r})"
-        assert report.get("ok") is True, f"probe not ok before status check: {report}"
+    rep = run_selftest(b)
+    assert rep.get("ok") is True, f"self-test not ok: {rep}"
+    assert (rep.get("audio") or {}).get("ok") is True, f"audio leg failed: {rep.get('audio')}"
+    assert (rep.get("cache") or {}).get("written") is True, f"cache not written: {rep.get('cache')}"
 
-        status = b.request("resolver.status", timeout=10)
-        src = (status.get("symbol_source") or "").lower()
-        assert "discover" in src or "cache" in src, f"unexpected symbol_source: {status}"
-        assert status.get("cache_exists") is True, f"cache_exists false: {status}"
-        assert status.get("cache_matches") is True, f"cache_matches false: {status}"
+    status = b.request("resolver.status", timeout=10)
+    src = (status.get("symbol_source") or "").lower()
+    assert "discover" in src or "cache" in src, f"unexpected symbol_source: {status}"
+    assert status.get("cache_exists") is True, f"cache_exists false: {status}"
+    assert status.get("cache_matches") is True, f"cache_matches false: {status}"
 
-        reader = status.get("reader") or {}
-        assert reader, "resolver.status reader dict is empty"
-        assert all(reader.get(k) for k in ("mX_", "KRt", "bf", "ngq", "nI_", "Xzy", "uEK")), (
-            f"resolver.status reader not fully populated: {reader}"
-        )
-    finally:
-        _cleanup_probe_tracks(b, before)
+    reader = status.get("reader") or {}
+    assert reader, "resolver.status reader dict is empty"
+    assert all(reader.get(k) for k in ("mX_", "KRt", "bf", "ngq", "nI_", "Xzy", "uEK")), (
+        f"resolver.status reader not fully populated: {reader}"
+    )

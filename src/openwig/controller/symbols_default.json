@@ -5,7 +5,7 @@
   "fj": "fj",
   "SZo": "com.bitwig.ramona.serial.SZo",
   "autoLanes": "zer",
-  "szFilter": { "field": "uEK", "method": "r3B", "param": "cxz_2" },
+  "szFilter": { "field": "uEK", "method": "r3B", "param": "UO1" },
   "clipCmd": { "cls": "X2S", "field": "fiU", "factory": "qgm", "exec": "r3B", "opid": 7350 },
   "noteCmd": { "cls": "alU", "field": "r3B", "factory": "XaN", "exec": "r3B", "opid": 7349 },
   "audio": { "hrv": "TD", "modeField": "r3B" }

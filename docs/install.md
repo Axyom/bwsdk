@@ -54,7 +54,7 @@ controller dir : C:\Users\<you>\Documents\Bitwig Studio\Controller Scripts
 controller     : OK
 bridge :7777   : OK (Bitwig 6.0.6) compatible
 internals      : self-test on a throwaway track ...
-  classes      : 4/4 internal classes load
+  classes      : 6/6 internal classes load
   automation   : OK
   clip create  : OK
   descriptor   : OK
