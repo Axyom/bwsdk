@@ -13,27 +13,15 @@ broken path is reported, not silently ignored.
 """
 from __future__ import annotations
 
-import os
 import struct
-import sys
 import time
 import wave
 from pathlib import Path
 
 from openwig.bridge import BridgeClient, BridgeError
+from openwig.paths import data_dir as _data_dir
 
 PROBE_TRACK = "__openwig_probe__"
-
-
-def _data_dir() -> Path:
-    """openwig data dir, matching the controller's (where the cache + log live)."""
-    if sys.platform == "win32":
-        base = os.environ.get("LOCALAPPDATA") or str(Path.home() / "AppData" / "Local")
-        return Path(base) / "openwig"
-    if sys.platform == "darwin":
-        return Path.home() / "Library" / "Logs" / "openwig"
-    base = os.environ.get("XDG_STATE_HOME") or str(Path.home() / ".local" / "state")
-    return Path(base) / "openwig"
 
 
 def _write_silent_wav(path: Path, seconds: float = 0.1):
@@ -97,6 +85,43 @@ def _delete_index(b, idx):
         pass
 
 
+def _create_probe_track(b, before, *, polls=8, name=PROBE_TRACK):
+    """Create + select a throwaway instrument track; return its index, or None.
+
+    The new track is identified by INDEX-DIFF against `before` (the occupied set the
+    caller snapshotted via _occupied), never by name: the post-create rename can
+    silently fail right after a controller reload. The caller must clean up with
+    _cleanup_probe_tracks(b, before) in a finally. Shared with the live tests.
+    """
+    b.request("track.create", {"type": "instrument", "name": name})
+    idx = None
+    for _ in range(polls):
+        time.sleep(0.25)
+        new_indices = sorted(_occupied(b) - before)
+        if new_indices:
+            idx = new_indices[-1]
+            break
+    if idx is None:
+        return None
+    b.request("track.select", {"index": idx})
+    time.sleep(0.3)
+    return idx
+
+
+def _cleanup_probe_tracks(b, before):
+    """Delete every slot that appeared since `before` (covers a failed rename), highest
+    index first so earlier indices stay valid. Guarded: cleanup must never mask the
+    report or test result (an exception raised in a finally supersedes the in-flight
+    return, so a bridge that died mid-probe would otherwise eat a useful partial report).
+    """
+    try:
+        appeared = sorted(_occupied(b) - before, reverse=True)
+    except Exception:  # noqa: BLE001
+        return
+    for idx in appeared:
+        _delete_index(b, idx)
+
+
 def run_selftest(b=None, *, timeout=90.0):
     """Run the resolver self-test against live Bitwig.
 
@@ -119,39 +144,33 @@ def run_selftest(b=None, *, timeout=90.0):
                 "classes": classes.get("classes"),
                 "bitwig": classes.get("bitwig")}
         before = _occupied(b)
-        new_indices = []
         try:
-            b.request("track.create", {"type": "instrument", "name": PROBE_TRACK})
-            # wait for a NEW occupied slot to appear (rename may fail, so do not match by name)
-            idx = None
-            for _ in range(8):
-                time.sleep(0.25)
-                new_indices = sorted(_occupied(b) - before)
-                if new_indices:
-                    idx = new_indices[-1]
-                    break
+            idx = _create_probe_track(b, before)
             if idx is None:
                 base["error"] = "probe track did not appear (cannot run round-trip)"
                 return base
-            b.request("track.select", {"index": idx})
-            time.sleep(0.3)
             b.request_op("resolver.probe", timeout=timeout)
             res = b.request("resolver.result")
             report = res.get("report") or dict(base)
             report["connected"] = True
             if res.get("error"):
                 report["error"] = res["error"]
-            # arranger audio-clip insert is validated separately (async; orchestrated here)
-            try:
-                report["audio"] = _validate_audio(b, idx)
-            except BridgeError as exc:
-                report["audio"] = {"ok": False, "detail": f"error ({exc})"}
+            # arranger audio-clip insert is validated separately (async; orchestrated here).
+            # Without a verified reader the read-back can never match, so don't pay the
+            # full per-candidate loop (wav + insert + 2.5s decode + 9000-node walk each)
+            # just to print one more FAIL line.
+            caps = report.get("capabilities") or {}
+            if (caps.get("descriptor_read") or {}).get("ok"):
+                try:
+                    report["audio"] = _validate_audio(b, idx)
+                except BridgeError as exc:
+                    report["audio"] = {"ok": False, "detail": f"error ({exc})"}
+            else:
+                report["audio"] = {"ok": False,
+                                   "detail": "skipped (descriptor read not verified; read-back impossible)"}
             return report
         finally:
-            # remove every slot that appeared during the probe (covers a failed rename),
-            # deleting from the highest index down so earlier indices stay valid.
-            for idx in sorted(_occupied(b) - before, reverse=True):
-                _delete_index(b, idx)
+            _cleanup_probe_tracks(b, before)
     finally:
         if own:
             b.stop()

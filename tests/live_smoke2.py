@@ -1,4 +1,4 @@
-"""Live smoke test, batch 2: render + track variants + modulators + sidechain +
+"""Live smoke test, batch 2: render + track variants +
 tempo automation + transport extras. Run manually (needs live Bitwig, sound)."""
 import sys
 import tempfile

@@ -15,66 +15,33 @@ finally delete every slot that appeared (covers a failed post-create rename), hi
 first so earlier indices stay valid.
 """
 import os
-import struct
 import tempfile
 import time
-import wave
 from pathlib import Path
 
 import pytest
 
+from openwig.diagnostics import (
+    _cleanup_probe_tracks,
+    _create_probe_track,
+    _occupied,
+    _write_silent_wav,
+)
+
 PROBE_TRACK = "__openwig_probe_test__"
-
-
-def _write_silent_wav(path, seconds=0.1):
-    """Write a tiny silent mono WAV (mirrors diagnostics._write_silent_wav)."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    n = int(44100 * seconds)
-    with wave.open(str(path), "wb") as w:
-        w.setnchannels(1)
-        w.setsampwidth(2)
-        w.setframerate(44100)
-        w.writeframes(struct.pack("<" + "h" * n, *([0] * n)))
-
-
-def _occupied(b):
-    """Set of main-track indices currently occupied (by name; the exists flag is flaky)."""
-    snap = b.request("state.snapshot")
-    return {t.get("index") for t in snap.get("tracks", []) if t.get("name")}
 
 
 def _make_probe_track(b):
     """Create + select a throwaway instrument track, returning (selected_index, before_set).
 
-    Raises AssertionError if the new slot never appears. The caller is responsible for
-    cleaning up via _cleanup_probe_tracks(b, before) in a finally.
+    Thin wrapper over the diagnostics helpers (one shared probe-track lifecycle): more
+    polls than doctor uses, and a hard assert instead of a partial report. The caller
+    cleans up via _cleanup_probe_tracks(b, before) in a finally.
     """
     before = _occupied(b)
-    b.request("track.create", {"type": "instrument", "name": PROBE_TRACK})
-    idx = None
-    for _ in range(16):
-        time.sleep(0.25)
-        new_indices = sorted(_occupied(b) - before)
-        if new_indices:
-            idx = new_indices[-1]
-            break
+    idx = _create_probe_track(b, before, polls=16, name=PROBE_TRACK)
     assert idx is not None, "probe track did not appear (cannot run round-trip)"
-    b.request("track.select", {"index": idx})
-    time.sleep(0.3)
     return idx, before
-
-
-def _cleanup_probe_tracks(b, before):
-    """Delete every slot that appeared since `before`, highest index first."""
-    try:
-        appeared = sorted(_occupied(b) - before, reverse=True)
-    except Exception:  # noqa: BLE001 - cleanup must never mask the test result
-        return
-    for idx in appeared:
-        try:
-            b.request("track.delete", {"index": idx})
-        except Exception:  # noqa: BLE001
-            pass
 
 
 pytestmark = pytest.mark.live

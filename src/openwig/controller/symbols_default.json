@@ -8,5 +8,5 @@
   "szFilter": { "field": "uEK", "method": "r3B", "param": "cxz_2" },
   "clipCmd": { "cls": "X2S", "field": "fiU", "factory": "qgm", "exec": "r3B", "opid": 7350 },
   "noteCmd": { "cls": "alU", "field": "r3B", "factory": "XaN", "exec": "r3B", "opid": 7349 },
-  "audio": { "hrv": "TD", "dispatch": "r3B", "zjs": "ZjS", "modeField": "r3B" }
+  "audio": { "hrv": "TD", "modeField": "r3B" }
 }

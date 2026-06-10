@@ -1,8 +1,8 @@
 """pytest bootstrap.
 
-Makes the in-tree src/ layout importable without `pip install -e .`, registers the
-`live` marker, auto-skips every live test unless OPENWIG_LIVE=1, and exposes a
-`live_bridge` fixture for the tests that talk to a real Bitwig.
+Makes the in-tree src/ layout importable without `pip install -e .`, auto-skips every
+live test unless OPENWIG_LIVE=1, and exposes a `live_bridge` fixture for the tests that
+talk to a real Bitwig. (The `live` marker itself is registered in pyproject.toml.)
 """
 import os
 import sys
@@ -11,14 +11,6 @@ from pathlib import Path
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
-
-
-def pytest_configure(config):
-    config.addinivalue_line(
-        "markers",
-        "live: tests that require a running Bitwig Studio with the OpenwigBridge "
-        "controller enabled (opt-in via OPENWIG_LIVE=1).",
-    )
 
 
 def pytest_collection_modifyitems(config, items):

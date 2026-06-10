@@ -16,21 +16,10 @@ import sys
 from importlib.resources import as_file, files
 from pathlib import Path
 
+from openwig.paths import data_dir as _data_dir
+
 CONTROLLER_FILENAME = "openwig_bridge.control.js"
 DEFAULTS_FILENAME = "symbols_default.json"  # bootstrap obfuscated-symbol mapping (DATA)
-
-
-def _data_dir() -> Path:
-    """openwig data dir where the controller reads the defaults + writes the cache/log.
-    Must match _resolveLogPath() in the controller."""
-    import os
-    if sys.platform == "win32":
-        base = os.environ.get("LOCALAPPDATA") or str(Path.home() / "AppData" / "Local")
-        return Path(base) / "openwig"
-    if sys.platform == "darwin":
-        return Path.home() / "Library" / "Logs" / "openwig"
-    base = os.environ.get("XDG_STATE_HOME") or str(Path.home() / ".local" / "state")
-    return Path(base) / "openwig"
 
 
 def _bitwig_user_scripts_dir() -> Path:
@@ -83,7 +72,13 @@ def install_controller(*, force: bool = False, dry_run: bool = False) -> int:
             shutil.copyfile(Path(p), data_dst / DEFAULTS_FILENAME)
         print(f"[openwig] symbol defaults -> {data_dst / DEFAULTS_FILENAME}")
     except Exception as exc:  # noqa: BLE001
-        print(f"[openwig] WARNING: could not install symbol defaults: {exc}", file=sys.stderr)
+        # Not a warning: without the data file the controller has NO symbol names at all
+        # (every name lives in symbols_default.json, none in code) and doctor cannot
+        # validate anything - the build would be misreported as unsupported.
+        print(f"[openwig] ERROR: could not install symbol defaults: {exc}", file=sys.stderr)
+        print(f"              -> the bridge is unusable without {DEFAULTS_FILENAME}; "
+              f"fix access to {_data_dir()} and re-run.", file=sys.stderr)
+        return 2
 
     if existed:
         # Bitwig watches this file and auto-reloads the script a few seconds after it
@@ -166,11 +161,16 @@ def _print_selftest(rep) -> int:
         cc, nc = cmds.get("clipCmd") or {}, cmds.get("noteCmd") or {}
         tag = "by op-id" if cmds.get("resolved") else "SEED (op-id lookup failed)"
         print(f"  commands     : {tag} (clip={cc.get('cls')}.{cc.get('factory')}, note={nc.get('cls')}.{nc.get('factory')})")
-    cache = rep.get("cache") or {}
-    if cache.get("written"):
+    cache = rep.get("cache")
+    if cache and cache.get("written"):
         print(f"  cache        : written -> {cache.get('path')}")
-    elif "reason" in cache:
-        print(f"  cache        : not written ({cache.get('reason')})")
+    elif cache:
+        print(f"  cache        : not written ({cache.get('reason', 'unknown')})")
+        if rep.get("ok") and not rep.get("blind"):
+            # all paths verified but no cache landed (e.g. unwritable data dir): the
+            # mandatory gate stays shut, so this MUST fail doctor, not exit 0.
+            print("                 the bridge stays GATED until a validated cache exists - fix and re-run doctor.")
+            rc = max(rc, 3)
     if rep.get("symbol_source"):
         print(f"  symbol source: {rep.get('symbol_source')}")
 

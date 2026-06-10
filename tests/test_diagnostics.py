@@ -125,6 +125,13 @@ def _no_sleep(monkeypatch):
     monkeypatch.setattr(diag.time, "sleep", lambda *a, **k: None)
 
 
+@pytest.fixture(autouse=True)
+def _isolated_data_dir(tmp_path, monkeypatch):
+    """_validate_audio writes probe wavs into the openwig data dir; point it at a
+    tmp dir so unit tests never touch the real user data dir."""
+    monkeypatch.setattr(diag, "_data_dir", lambda: tmp_path)
+
+
 # -- run_selftest: happy path ------------------------------------------------------
 
 def test_selftest_happy_path_returns_report_connected():
@@ -388,14 +395,28 @@ def test_print_selftest_prints_reader_cache_written_and_symbol_source(capsys):
     assert "resolved live (cached)" in out
 
 
-def test_print_selftest_prints_cache_not_written_reason(capsys):
+def test_print_selftest_cache_not_written_on_ok_report_fails_doctor(capsys):
+    # all paths verified but the cache did not land: the mandatory gate stays shut,
+    # so doctor must exit non-zero and say so (not print all-OK and exit 0).
     rep = _rep_all_ok()
     rep["cache"] = {"written": False, "reason": "read-only filesystem"}
     rc = _print_selftest(rep)
     out = capsys.readouterr().out
-    assert rc == 0
+    assert rc == 3
     assert "not written" in out
     assert "read-only filesystem" in out
+    assert "GATED" in out
+
+
+def test_print_selftest_cache_not_written_blind_stays_zero(capsys):
+    # a blind probe intentionally never caches; that must NOT fail doctor.
+    rep = _rep_all_ok()
+    rep["blind"] = True
+    rep["cache"] = {"written": False, "reason": "blind mode"}
+    rc = _print_selftest(rep)
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "blind mode" in out
 
 
 # -- _print_selftest: NEW optional "commands" report field --------------------------
