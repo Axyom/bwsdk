@@ -7,7 +7,7 @@
 [![Python 3.11+](https://img.shields.io/badge/Python-3.11%2B-3776AB.svg)](#install)
 
 Goes where Bitwig's official Controller API can't: build arrangements, devices,
-sidechains, automation, and full multi-track songs from a Python program, then
+automation, and full multi-track songs from a Python program, then
 render to `.wav`.
 
 Free and open source (GPL-3.0). Windows only. Early alpha.
@@ -53,7 +53,7 @@ pip install openwig
 python -m openwig install   # copies the controller into Bitwig's user dir
 ```
 
-Then in Bitwig: **Settings → Controllers → openwig → Add → OpenwigBridge** (one time), and verify with `python -m openwig doctor`.
+Then in Bitwig: **Settings → Controllers → openwig → Add → OpenwigBridge** (one time), and run `python -m openwig doctor` (**required**: validates + caches the obfuscated symbols for your exact build; openwig refuses to run until it has, and you re-run it after a Bitwig update).
 
 Full guide (requirements, troubleshooting, uninstall): **[Install docs →](https://axyom.github.io/openwig/install/)**
 

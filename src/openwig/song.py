@@ -278,14 +278,11 @@ class Track:
         time.sleep(0.5); return self
 
     def audio_clip(self, path, start=0.0, duration=4.0):
-        """Drop a .wav/.aiff onto the arranger at `start` (beats) with `duration`
-        (beats). Works the same way Bitwig's drag-drop from the browser does-
-        ArrangerClipInsertionPoint.r3B(File, ZjS.r3B, null). Path discovered from
-        the public InsertionPoint class in com/bitwig/flt/document/core/iface/clipboard.
+        """Drop a `.wav`/`.aiff` onto the arranger at `start` (beats) with `duration` (beats).
 
-        Sleeps 1.5s after the call: Bitwig's audio loader decodes the file off the
-        GraalJS thread but back-to-back inserts can saturate the controller's queue
-        and crash the bridge (observed). 1.5s gives the loader breathing room."""
+        Uses the arranger insertion point resolved by `openwig doctor` (run it once per Bitwig
+        build). Sleeps 1.5s after the call: Bitwig decodes the file off-thread and back-to-back
+        inserts can saturate the controller queue."""
         self.s.b.request("track.insert_audio_clip", {
             "track": self.idx, "path": str(path),
             "start": float(start), "duration": float(duration),
@@ -293,7 +290,7 @@ class Track:
         time.sleep(1.5); return self
 
     def audio_clips(self, segments):
-        """Lay several audio clips: [(path, start, duration), ...]."""
+        """Lay several audio clips: `[(path, start, duration), ...]`."""
         for (path, start, dur) in segments:
             self.audio_clip(path, start=start, duration=dur)
         return self
@@ -359,28 +356,6 @@ class Track:
         for i, v in values.items():
             self.s.b.request("device.set_remote", {"index": int(i), "value": float(v)}); time.sleep(0.03)
         return self
-
-    def sidechain_from(self, source_track, *, source_device_index=0, sink_device_index=None):
-        """Wire this track's sidechain-capable device (e.g. Compressor+, Gate+) to
-        listen to `source_track`'s signal. `source_device_index` picks which device
-        on the source track provides the signal (0 = first / often the instrument).
-        `sink_device_index` selects which device on THIS track owns the sidechain
-        input (defaults to currently-selected device - set it first if needed).
-
-        Discovered via Bitwig's own ModuleGraphTests.java: each device has a `tkG`
-        component (extends BOg) with `fCq()` returning a dML source-selector;
-        dML.r3B(QcL) wires the source. Source QcL = source device's audio output
-        (GVZ.jB1()).
-        """
-        from_idx = source_track.idx if hasattr(source_track, "idx") else int(source_track)
-        self.select()
-        if sink_device_index is not None:
-            self.s.b.request("device.select_index", {"index": int(sink_device_index)})
-            time.sleep(0.3)
-        res = self.s.b.request("device.set_sidechain_source",
-                               {"source_track": int(from_idx),
-                                "source_device_index": int(source_device_index)})
-        time.sleep(0.8); return self
 
     def routing_info(self):
         """Read this track's routing state (input source flags). READ-ONLY - Bitwig's

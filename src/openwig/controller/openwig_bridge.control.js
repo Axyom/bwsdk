@@ -42,8 +42,18 @@ var NUM_CUES    = 16;
 var transport, trackBank, effectTrackBank, masterTrack, sceneBank;
 var cursorTrack, cursorDevice, remoteControlsPage, cursorTrackDeviceBank;
 var masterCursorDevice, masterRemotes, masterDeviceBank;
-var gSerializeB64 = null, gSerializeErr = null;
 var gWalk = null, gWalkErr = null;           // generic descriptor-graph reader result (JSON string)
+var gProbe = null, gProbeErr = null;         // resolver self-test report (JSON-able object); see resolver.probe
+var _AUTO_SYM = null;                         // cached structurally-discovered automation symbols
+var gBlindDiscovery = false;                  // test switch: structural discovery only (no name hints, no fallback)
+// Resolved obfuscated-symbol table. NO obfuscated names are hardcoded here: it is populated
+// at init from the bootstrap DATA file (symbols_default.json, shipped + installed next to the
+// cache) and then overwritten per-build by doctor's validated cache (symbols_cache.json).
+// Reflection sites read names from here, so a re-obfuscated build keeps working once doctor
+// has refreshed the cache. Numeric op-ids in the data are protocol data, not obfuscated names.
+var SYM = { clipCmd: {}, noteCmd: {}, audio: {}, szFilter: {} };
+var ACIP_CLASS = "com.bitwig.flt.document.core.iface.clipboard.clip.ArrangerClipInsertionPoint"; // stable, non-obfuscated
+var gSymSource = "UNRESOLVED (init pending)";  // "cache"|"discovered+cached"|"defaults ..."|"UNRESOLVED ..."  (validated iff cache or discovered+cached); set by _loadSymbols() at init
 var gOpsDone = 0;                            // count of finished document-thread ops (completion signal; see ops.done)
 var gClipNotes = {}, gNoteScroll = 0, gNoteStepSize = 0.25;
 var arranger, cueMarkerBank;
@@ -114,6 +124,10 @@ function init() {
     masterTrack = host.createMasterTrack(0);
     sceneBank   = host.createSceneBank(NUM_SCENES);
     cursorTrack = host.createCursorTrack("openwig-cursor", "Openwig Cursor", NUM_SENDS, NUM_CLIPS, true);
+    // mark cursor-track volume/pan values so the resolver self-test can read their raw +
+    // normalized values (the normalize-fn probe); .get()/.getRaw() throw without this.
+    cursorTrack.volume().markInterested(); cursorTrack.volume().value().markInterested();
+    cursorTrack.pan().markInterested();    cursorTrack.pan().value().markInterested();
     cursorDevice       = cursorTrack.createCursorDevice();
     remoteControlsPage = cursorDevice.createCursorRemoteControlsPage(NUM_REMOTE);
     // Mark properties needed by device.all_remote_pages - otherwise .get() on
@@ -177,6 +191,9 @@ function init() {
             });
         }
     } catch (e) { host.errorln("noteStepObserver setup: " + e); }
+
+    _loadSymbols();              // load obfuscated-name mapping from the data file + per-build cache
+    flog("symbol source: " + gSymSource + "  (fingerprint " + _fingerprint() + ")");
 
     buildState();
     wireObservers();
@@ -390,6 +407,29 @@ function sendObj(obj) {
     gConnection.send(bytes);
 }
 
+// doctor is MANDATORY: until the symbol mapping has been VALIDATED for this exact Bitwig
+// build, refuse every internals-dependent op. The mapping is validated when a matching
+// per-build cache exists (loaded at init) or when doctor validated + cached it this session.
+// The only methods allowed before that are the ones `openwig doctor` itself needs to probe
+// and validate the build, plus basic connectivity - so doctor can break the chicken-and-egg.
+function _symbolsValidated() { return gSymSource === "cache" || gSymSource === "discovered+cached"; }
+// Public-API methods (e.g. track.insert_audio_clip) are NOT here: they stay gated. Doctor
+// reaches the audio-insert reflection path via the resolver.audio_probe_insert alias instead.
+// The resolver surface is listed EXPLICITLY (not exempted by prefix) so adding a resolver
+// method never silently bypasses the gate; audio_probe_insert is the one pre-validation
+// mutation, used by doctor on its throwaway track only.
+var _DOCTOR_METHODS = {
+    "ping": true, "hello": true, "ops.done": true, "host.version": true, "state.snapshot": true,
+    "track.create": true, "track.select": true, "track.delete": true,
+    "obj.walk": true, "obj.walk_result": true,
+    "resolver.classes": true, "resolver.status": true, "resolver.probe": true,
+    "resolver.result": true, "resolver.audio_candidates": true,
+    "resolver.audio_probe_insert": true, "resolver.set_audio_hrv": true
+};
+function _gateAllows(method) {
+    return _symbolsValidated() || _DOCTOR_METHODS[method] === true;
+}
+
 function handleLine(line) {
     var msg;
     try { msg = JSON.parse(line); }
@@ -404,6 +444,13 @@ function handleLine(line) {
     if (!fn) {
         log("unknown method: " + method);
         if (id !== null) sendObj({ jsonrpc: "2.0", id: id, error: { code: -32601, message: "unknown method: " + method } });
+        return;
+    }
+    if (!_gateAllows(method)) {
+        log("BLOCKED (symbols not validated; run doctor): " + method);
+        if (id !== null) sendObj({ jsonrpc: "2.0", id: id, error: { code: -32002,
+            message: "openwig: symbols are not validated for this Bitwig build (" + gSymSource +
+                     "). Run `openwig doctor` to resolve + cache them, then retry." } });
         return;
     }
     try {
@@ -452,9 +499,11 @@ function _invokeNoArg(obj, name) {
     }
     throw "no no-arg method " + name;
 }
-// fj = the document automatable-value base; reach it from a control-surface target
+// fj = the document automatable-value base; reach it from a control-surface target. The fj
+// class name is resolved into SYM.fj (bootstrap seed, overwritten by doctor's cache and by
+// automation discovery), so this is not a hardcoded dependence.
 function _fjFrom(obj) {
-    var fjC = Java.type("fj").class;
+    var fjC = Java.type(SYM.fj).class;
     if (obj != null && fjC.isInstance(obj)) return obj;
     var c = obj.getClass();
     while (c != null) {
@@ -468,21 +517,6 @@ function _fjFrom(obj) {
         c = c.getSuperclass();
     }
     return null;
-}
-// the arranger automation-event insert: r3B(a1x, time, value, curvature, hasCurv, adjPrev, oJk, bT1)
-function _findAutomationInsert(cls) {
-    var c = cls;
-    while (c != null) {
-        var ms = c.getDeclaredMethods();
-        for (var i = 0; i < ms.length; i++) {
-            var m = ms[i]; if (("" + m.getName()) !== "r3B") continue;
-            var ps = m.getParameterTypes(); if (ps.length !== 8) continue;
-            if (("" + ps[0].getSimpleName()) === "a1x" && ("" + ps[1].getName()) === "double" &&
-                ("" + ps[6].getSimpleName()) === "oJk") { m.setAccessible(true); return m; }
-        }
-        c = c.getSuperclass();
-    }
-    throw "automation insert method not found";
 }
 
 // Find a parameter value's NORMALIZE function on its document fj: the 1-arg(double)->
@@ -524,8 +558,10 @@ function _findNormalizeFn(fj, curNative, curNorm) {
 // cwo_3.KRt() = Arrays.asList(this.azd): the public, collision-free way to get the
 // serialized-property descriptor list (empty if the class wasn't realized yet).
 function _descriptors(cwo) {
-    return _inv0(cwo, "KRt");          // java.util.List<cxz_2>
+    return _inv0(cwo, SYM.KRt);        // java.util.List<cxz_2>
 }
+// uo1.mX_() -> descriptor container, routed through the resolved name.
+function _mx(uo1) { return _invokeNoArg(uo1, SYM.mX_); }
 var _MCACHE = {};
 function _findMethod(cls, name, pcount, p1simple) {
     var key = cls.getName() + "#" + name + "/" + pcount + "/" + (p1simple || "");
@@ -551,15 +587,22 @@ function _inv1(obj, name, a) {                      // cached reflected 1-arg ca
     var m = _findMethod(obj.getClass(), name, 1, null);
     return (m == null) ? null : m.invoke(obj, a);
 }
-var _SZUEK = null;
-function _szPass(d, uo1) {                          // Bitwig's own serialize filter (uEK)
-    if (_SZUEK == null) _SZUEK = Java.type("com.bitwig.ramona.serial.SZo").uEK;
-    var m = _findMethod(_SZUEK.getClass(), "r3B", 2, "cxz_2");
+// Bitwig's own serialize filter: the reader includes a descriptor only if it passes. The
+// filter singleton (a static SZo field) + its (descriptor, parent)->boolean method come from
+// SYM.szFilter (data / cache). Falls back to "include all" (nI_ still gates) if unresolved.
+var _SZFILT = null;
+function _szPass(d, uo1) {
+    if (_SZFILT === null) {
+        try { var f = Java.type(SYM.SZo).class.getDeclaredField(SYM.szFilter.field); f.setAccessible(true); _SZFILT = f.get(null); }
+        catch (e) { _SZFILT = false; }
+    }
+    if (!_SZFILT) return true;
+    var m = _findMethod(_classOf(_SZFILT), SYM.szFilter.method, 2, SYM.szFilter.param);
     if (m == null) return true;
-    return !!m.invoke(_SZUEK, d, uo1);
+    try { return !!m.invoke(_SZFILT, d, uo1); } catch (e) { return true; }
 }
 function _relChildren(d, uo1) {                     // null if d is not a relationship
-    var m = _findMethod(d.getClass(), "uEK", 2, "String");
+    var m = _findMethod(_classOf(d), SYM.uEK, 2, "String");
     if (m == null) return null;
     return m.invoke(d, uo1, null);
 }
@@ -575,8 +618,8 @@ function _jval(v) {
 var _IHC = null;
 function _walkObj(uo1, depth, maxDepth, budget, opts) {
     var o = {}, cwo;
-    try { cwo = uo1.mX_(); } catch (e) { return { _err: "mX_: " + e }; }
-    try { o._cls = "" + _inv0(cwo, "bf"); } catch (e) { o._cls = "?"; }
+    try { cwo = _mx(uo1); } catch (e) { return { _err: "mX_: " + e }; }
+    try { o._cls = "" + _inv0(cwo, SYM.bf); } catch (e) { o._cls = "?"; }
     if (_IHC == null) _IHC = Java.type("java.lang.System");
     var ihc = _IHC.identityHashCode(uo1);
     o._id = ihc;                                        // object identity (for cross-reference matching)
@@ -589,9 +632,9 @@ function _walkObj(uo1, depth, maxDepth, budget, opts) {
     for (var i = 0; i < alen; i++) {
         if (budget.n <= 0) { o._trunc = true; break; }
         var d = azd.get(i);
-        try { if (!_inv0(d, "nI_") || (!opts.noFilter && !_szPass(d, uo1))) continue; }
+        try { if (!_inv0(d, SYM.nI_) || (!opts.noFilter && !_szPass(d, uo1))) continue; }
         catch (e) { if (depth === 0 && !o._ferr) o._ferr = "" + e; continue; }
-        var pid; try { pid = "" + _inv0(d, "ngq"); } catch (e) { pid = "i" + i; }
+        var pid; try { pid = "" + _inv0(d, SYM.ngq); } catch (e) { pid = "i" + i; }
         budget.n--;
         var kids = null;
         try { kids = _relChildren(d, uo1); } catch (e) { kids = null; }
@@ -601,11 +644,11 @@ function _walkObj(uo1, depth, maxDepth, budget, opts) {
                 if (budget.n <= 0) { o._trunc = true; break; }
                 var k = kids.get(j);
                 if (depth < maxDepth) arr.push(_walkObj(k, depth + 1, maxDepth, budget, opts));
-                else { var rc; try { rc = "" + _inv0(k.mX_(), "bf"); } catch (e) { rc = "?"; } arr.push({ _ref: rc }); }
+                else { var rc; try { rc = "" + _inv0(_mx(k), SYM.bf); } catch (e) { rc = "?"; } arr.push({ _ref: rc }); }
             }
             o[pid] = arr;
         } else {
-            try { o[pid] = _jval(_inv1(d, "Xzy", uo1)); } catch (e) { o[pid] = "<err>"; }
+            try { o[pid] = _jval(_inv1(d, SYM.Xzy, uo1)); } catch (e) { o[pid] = "<err>"; }
         }
     }
     return o;
@@ -631,6 +674,292 @@ function _runOnDocumentThread(proxy, jsRun) {
     execM.invoke(proxy, task);
 }
 
+// ── name-free (structural) discovery of the arranger-automation cluster ─────────
+// The obfuscated names below are stable for one Bitwig build but get re-obfuscated each
+// release. To survive a release, we IDENTIFY the same symbols by SHAPE instead of by name,
+// anchored on the stable public-API objects (a track target + a parameter proxy). This is
+// the headline path ("write arranger automation, which the official API can't"); the other
+// internal paths still use the hardcoded names and are covered by the doctor self-test.
+function _dtype(t) { return "" + t.getName(); }
+// Robust runtime class of a host object. Inside a long reflection loop on the document
+// thread, the JS-side `obj.getClass()` member access intermittently fails with a GraalJS
+// "Message not supported" interop error; invoking Object.getClass() REFLECTIVELY avoids it.
+var _GETCLASS = null;
+function _classOf(o) {
+    if (_GETCLASS == null) { _GETCLASS = Java.type("java.lang.Object").class.getMethod("getClass"); _GETCLASS.setAccessible(true); }
+    return _GETCLASS.invoke(o);
+}
+// ── op-id command discovery: resolve obfuscated command-host classes (clip create, note
+// insert, ...) by the STABLE numeric op-id the command exposes via ngq(), rather than by
+// hardcoded class name. The op-id is wire-protocol data (not obfuscated), so this survives a
+// re-obfuscated build. Scans the Bitwig jar's default package (one-time, at doctor).
+var _JAR_CLASSES = null, _gCmdScanInstantiated = 0;
+function _jarDefaultPkgClasses() {
+    if (_JAR_CLASSES) return _JAR_CLASSES;
+    var loc = host.getClass().getProtectionDomain().getCodeSource().getLocation();
+    var jarFile = new (Java.type("java.io.File"))(loc.toURI());
+    var zf = new (Java.type("java.util.zip.ZipFile"))(jarFile), en = zf.entries(), names = [];
+    while (en.hasMoreElements()) {
+        var n = "" + en.nextElement().getName();
+        if (n.length < 7 || n.substring(n.length - 6) !== ".class") continue;
+        if (n.indexOf("/") === -1) names.push(n.substring(0, n.length - 6));
+    }
+    zf.close(); _JAR_CLASSES = names; return names;
+}
+// First 2-arg method on rt (hierarchy) taking (non-primitive [byU-assignable if given], List).
+function _hasExec(rt, byUClass, ListC) {
+    var c = rt;
+    while (c != null) {
+        var ms = c.getDeclaredMethods();
+        for (var i = 0; i < ms.length; i++) {
+            var m = ms[i]; if (m.getParameterCount() !== 2) continue;
+            var ps = m.getParameterTypes();
+            if (ps[0].isPrimitive() || !ListC.isAssignableFrom(ps[1])) continue;
+            if (byUClass != null && !ps[0].isAssignableFrom(byUClass)) continue;
+            return "" + m.getName();
+        }
+        c = c.getSuperclass();
+    }
+    return null;
+}
+// Find command hosts for a SET of op-ids in a single jar pass (early-stops once all are
+// found). Returns { opid: {cls, field, factory, exec} }. `byUClass`, if given, requires the
+// command's exec to accept it as the first arg (narrows + speeds the clip-create case).
+// Does cls (hierarchy) declare a no-arg int/long/short getter? (a command exposes its op-id
+// through one). Used to pre-filter command candidates without depending on the reader's ngq.
+function _hasNumericNoArg(cls) {
+    var c = cls;
+    while (c != null) {
+        var ms = c.getDeclaredMethods();
+        for (var i = 0; i < ms.length; i++) {
+            if (ms[i].getParameterCount() !== 0) continue;
+            var rn = "" + ms[i].getReturnType().getName();
+            if (rn === "int" || rn === "long" || rn === "short") return true;
+        }
+        c = c.getSuperclass();
+    }
+    return false;
+}
+// Scan a command's no-arg int/long getters; return the first value that is in `want`, else null.
+function _cmdMatchOpId(cmd, want) {
+    var c = _classOf(cmd), seen = {};
+    while (c != null) {
+        var ms = c.getDeclaredMethods();
+        for (var i = 0; i < ms.length; i++) {
+            var m = ms[i]; if (m.getParameterCount() !== 0) continue;
+            var rn = "" + m.getReturnType().getName();
+            if (rn !== "int" && rn !== "long" && rn !== "short") continue;
+            var nm = "" + m.getName(); if (seen[nm]) continue; seen[nm] = 1;
+            try { m.setAccessible(true); var id = "" + m.invoke(cmd); if (want[id]) return id; } catch (e) {}
+        }
+        c = c.getSuperclass();
+    }
+    return null;
+}
+function _findCommandsByOpIds(opids, byUClass) {
+    var names = _jarDefaultPkgClasses();
+    var Class = Java.type("java.lang.Class"), Mod = Java.type("java.lang.reflect.Modifier");
+    var ListC = Java.type("java.util.List").class, cl = host.getClass().getClassLoader();
+    var want = {}, found = {}, remaining = 0;
+    for (var w = 0; w < opids.length; w++) {
+        if (opids[w] == null) continue;                  // missing op-id (defaults file absent): never scan for it
+        var wk = "" + opids[w];
+        if (!want[wk]) { want[wk] = true; remaining++; } // count DISTINCT ids, or remaining never reaches 0
+    }
+    if (remaining === 0) return found;                   // nothing resolvable: skip the full-jar scan entirely
+    for (var i = 0; i < names.length && remaining > 0; i++) {
+        var cls; try { cls = Class.forName(names[i], false, cl); } catch (e) { continue; }
+        var fields; try { fields = cls.getDeclaredFields(); } catch (e) { continue; }
+        for (var f = 0; f < fields.length && remaining > 0; f++) {
+            if (!Mod.isStatic(fields[f].getModifiers())) continue;
+            var T = fields[f].getType(); if (T.isPrimitive() || T.isArray()) continue;
+            var tc = T, seenM = {};
+            while (tc != null) {
+                var tms = tc.getDeclaredMethods();
+                for (var m = 0; m < tms.length; m++) {
+                    var M = tms[m]; if (M.getParameterCount() !== 0) continue;
+                    var mn = "" + M.getName(); if (seenM[mn]) continue; seenM[mn] = 1;
+                    var RT = M.getReturnType(); if (RT.isPrimitive() || RT.isArray()) continue;
+                    if (!_hasNumericNoArg(RT)) continue;                 // command exposes a numeric op-id
+                    var execName = _hasExec(RT, byUClass, ListC); if (execName == null) continue;
+                    try {
+                        fields[f].setAccessible(true);
+                        var val = fields[f].get(null); if (val == null) continue;
+                        M.setAccessible(true); var cmd = M.invoke(val); if (cmd == null) continue;
+                        _gCmdScanInstantiated++;
+                        var id = _cmdMatchOpId(cmd, want);
+                        if (id != null && !found[id]) {
+                            found[id] = { cls: names[i], field: "" + fields[f].getName(), factory: mn, exec: execName };
+                            remaining--;
+                        }
+                    } catch (e) {}
+                }
+                tc = tc.getSuperclass();
+            }
+        }
+    }
+    return found;
+}
+
+// The breakpoint-insert method has a very specific 8-arg shape:
+//   (valueRef, double time, double value, double curvature, boolean, boolean, Enum interp, Object)
+// Find it on a class hierarchy by that shape alone (no name). Returns {method, avr, interp}.
+function _findInsertShape(cls) {
+    var c = cls;
+    while (c != null) {
+        var ms = c.getDeclaredMethods();
+        for (var i = 0; i < ms.length; i++) {
+            var m = ms[i]; if (m.getParameterCount() !== 8) continue;
+            var p = m.getParameterTypes();
+            if (_dtype(p[1]) !== "double" || _dtype(p[2]) !== "double" || _dtype(p[3]) !== "double") continue;
+            if (_dtype(p[4]) !== "boolean" || _dtype(p[5]) !== "boolean") continue;
+            if (!p[6].isEnum()) continue;
+            if (p[0].isPrimitive() || p[0].isEnum() || p[0].isArray()) continue;
+            m.setAccessible(true);
+            return { method: m, avr: p[0], interp: p[6] };
+        }
+        c = c.getSuperclass();
+    }
+    return null;
+}
+// The value-ref identity factory: a static 1-arg method on the avr class returning an avr.
+// Its single parameter type IS the value base (fj). Returns {factory, fjClass}.
+function _findAvrFactory(avr) {
+    var Mod = Java.type("java.lang.reflect.Modifier");
+    var ms = avr.getDeclaredMethods();
+    for (var i = 0; i < ms.length; i++) {
+        var m = ms[i];
+        if (!Mod.isStatic(m.getModifiers()) || m.getParameterCount() !== 1) continue;
+        if (!avr.isAssignableFrom(m.getReturnType())) continue;
+        var pt = m.getParameterTypes()[0];
+        if (pt.isPrimitive() || pt.isEnum() || pt.isArray()) continue;
+        m.setAccessible(true);
+        return { factory: m, fjClass: pt };
+    }
+    return null;
+}
+// An instance of fjClass reachable from obj (itself, or via one of its no-arg getters).
+function _reachInstance(obj, fjClass) {
+    if (obj == null) return null;
+    if (fjClass.isInstance(obj)) return obj;
+    var c = _classOf(obj);
+    while (c != null) {
+        var ms = c.getDeclaredMethods();
+        for (var i = 0; i < ms.length; i++) {
+            var m = ms[i];
+            if (m.getParameterCount() !== 0) continue;
+            var rt = m.getReturnType(); if (rt.isPrimitive() || rt === java.lang.Void.TYPE) continue;
+            var nm = "" + m.getName();
+            try { var r = _invokeNoArg(obj, nm); if (r != null && fjClass.isInstance(r)) return r; } catch (e) {}
+        }
+        c = c.getSuperclass();
+    }
+    return null;
+}
+// Pick LINEAR/HOLD interpolation constants. The interp enum keeps SEMANTIC constant names
+// ("LINEAR", "HOLD"/"STEP") - not obfuscated symbols - so we match those directly (robust
+// across releases, and legitimate even in blind mode). Falls back to the first constant if
+// names are unrecognized; point insertion is unaffected by interpolation type.
+function _pickInterp(interpEnum) {
+    var consts = interpEnum.getEnumConstants();
+    var LIN = null, HOLD = null;
+    for (var k = 0; k < consts.length; k++) {
+        var nm = ("" + consts[k].name()).toUpperCase();
+        if (nm.indexOf("LIN") === 0) LIN = consts[k];
+        else if (nm.indexOf("HOLD") === 0 || nm.indexOf("STEP") === 0) HOLD = consts[k];
+    }
+    var resolved = (LIN != null && HOLD != null);
+    if (LIN == null) LIN = consts.length ? consts[0] : null;
+    if (HOLD == null) HOLD = LIN;
+    return { LINEAR: LIN, HOLD: HOLD, resolved: resolved };
+}
+// Every no-arg getter on byU whose returned object's concrete class carries the insert
+// shape. The shape is NOT unique (several lane containers match) - only one is the real
+// track automation_lanes, so the caller validates by execution. Getters are invoked BY NAME
+// via _invokeNoArg: invoking the reflected Method object directly returns a lazy GraalJS
+// value that fails ("Message not supported") when forced for some accessors. `accessor` is
+// the method NAME. When not blind, the known accessor name leads.
+function _autoCandidates(byU) {
+    var out = [], seen = {}, c = _classOf(byU);
+    while (c != null) {
+        var ms = c.getDeclaredMethods();
+        for (var i = 0; i < ms.length; i++) {
+            var m = ms[i];
+            if (m.getParameterCount() !== 0) continue;
+            var nm = "" + m.getName(); if (seen[nm]) continue; seen[nm] = 1;
+            var rt = m.getReturnType();
+            if (rt.isPrimitive() || rt === java.lang.Void.TYPE || rt.isArray()) continue;
+            var obj; try { obj = _invokeNoArg(byU, nm); } catch (e) { continue; }
+            if (obj == null) continue;
+            var sh; try { sh = _findInsertShape(_classOf(obj)); } catch (e) { continue; }
+            if (sh) out.push({ accessor: nm, shape: sh, name: nm });
+        }
+        c = c.getSuperclass();
+    }
+    var hint = SYM.autoLanes;   // known-good lanes accessor (from data); try it first, not blind
+    if (!gBlindDiscovery && hint) out.sort(function (a, b) { return (b.name === hint) - (a.name === hint); });
+    return out;
+}
+// Insert points with a resolved symbol set S. Throws if the lane is not a valid target
+// (wrong candidates throw here - that is how the caller tells them apart). Returns count.
+function _doInsert(S, byU, pp, pts) {
+    var al = _invokeNoArg(byU, S.alAccessor);
+    // A remote param's deepest target is a proxy atom: the real fj sits behind getAtom()
+    // (stable control-surface name), one further getter away. Try the atom first (volume/pan
+    // targets ARE the atom, so the direct fallback keeps them working).
+    var tgt = pp.getDeepestTarget(), fjInst = null;
+    try { fjInst = _reachInstance(_invokeNoArg(tgt, "getAtom"), S.fjClass); } catch (e) {}
+    if (fjInst == null) fjInst = _reachInstance(tgt, S.fjClass);
+    if (fjInst == null) throw "value base (fj) instance not reachable from param";
+    var avr = S.factory.invoke(null, fjInst);
+    var Dbl = Java.type("java.lang.Double"), Bl = Java.type("java.lang.Boolean");
+    var n = 0;
+    for (var i = 0; i < pts.length; i++) {
+        var pt = pts[i];
+        var hasCurv = (pt.length > 2 && pt[2] != null);
+        var curv = hasCurv ? pt[2] : 0.0;
+        var interp = (pt.length > 3 && ("" + pt[3]) === "hold") ? S.HOLD : S.LINEAR;
+        S.insert.invoke(al, avr, Dbl.valueOf(pt[0]), Dbl.valueOf(pt[1]), Dbl.valueOf(curv),
+                        Bl.valueOf(hasCurv), Bl.FALSE, interp, null);
+        n++;
+    }
+    return n;
+}
+// Insert via structurally-discovered symbols (no obfuscated names). Tries each shape-matching
+// candidate and keeps the first whose insert actually succeeds, caching it for the session.
+// Throws if none validate.
+function _insertAutoDiscovered(byU, pp, pts) {
+    if (_AUTO_SYM) {
+        // validated this session - but on a different anchor class (track vs transport
+        // document) the lanes accessor could differ, so fall through to rediscovery
+        // instead of failing the whole op when the cached set doesn't fit this anchor.
+        try { return _doInsert(_AUTO_SYM, byU, pp, pts); }
+        catch (e) { flog("[auto] cached symbols failed on this anchor (" + e + "); rediscovering"); }
+    }
+    var cands = _autoCandidates(byU);
+    if (!cands.length) throw "no automation_lanes candidate (insert shape) found";
+    var lastErr = "no candidate validated";
+    for (var ci = 0; ci < cands.length; ci++) {
+        var sh = cands[ci].shape;
+        var fac = _findAvrFactory(sh.avr); if (!fac) { lastErr = "no value-ref factory"; continue; }
+        var ip = _pickInterp(sh.interp);
+        var cand = { alAccessor: cands[ci].accessor, insert: sh.method, avr: sh.avr,
+                     factory: fac.factory, fjClass: fac.fjClass, interp: sh.interp,
+                     LINEAR: ip.LINEAR, HOLD: ip.HOLD, interpResolved: ip.resolved };
+        try { var n = _doInsert(cand, byU, pp, pts); _AUTO_SYM = cand; return n; }   // cache AFTER success
+        catch (e) { lastErr = "" + e; }
+    }
+    throw lastErr;
+}
+// Core arranger-automation insert. MUST run on the document-edit thread. Resolves the
+// automation cluster purely by name-free structural discovery (validated by execution).
+// Returns { inserted, param, via }.
+function _insertAutomationPoints(byU, paramProxy, which, pts) {
+    var pp = paramProxy();
+    var n = _insertAutoDiscovered(byU, pp, pts);
+    return { inserted: n, param: which, via: "discovered" };
+}
+
 function automationWriteOffline(p) {
     var pts = p.points; if (!pts || !pts.length) return { error: "no points" };
     var which = "" + bget(p, "param", "volume");
@@ -642,26 +971,7 @@ function automationWriteOffline(p) {
     _runOnDocumentThread(cursorTrack, function () {
         var byU = cursorTrack.getDeepestTarget();
         if (byU == null) throw "no track target (select a track first)";
-        var al = _invokeNoArg(byU, "zer");                       // automation_lanes (udG)
-        var pp = paramProxy();
-        var fj = _fjFrom(_invokeNoArg(pp.getDeepestTarget(), "getAtom"));
-        if (fj == null) fj = _fjFrom(pp.getDeepestTarget());
-        if (fj == null) throw "could not resolve fj for param '" + which + "'";
-        var a1x = Java.type("com.bitwig.flt.document.core.master.a1x").r3B(fj);
-        var oJk = Java.type("oJk"), LINEAR = oJk.Xzy, HOLD = oJk.r3B;
-        var Dbl = Java.type("java.lang.Double"), Bl = Java.type("java.lang.Boolean");
-        var m = _findAutomationInsert(al.getClass());
-        var n = 0;
-        for (var i = 0; i < pts.length; i++) {
-            var pt = pts[i];
-            var hasCurv = (pt.length > 2 && pt[2] != null);
-            var curv = hasCurv ? pt[2] : 0.0;
-            var interp = (pt.length > 3 && ("" + pt[3]) === "hold") ? HOLD : LINEAR;
-            m.invoke(al, a1x, Dbl.valueOf(pt[0]), Dbl.valueOf(pt[1]), Dbl.valueOf(curv),
-                     Bl.valueOf(hasCurv), Bl.FALSE, interp, null);
-            n++;
-        }
-        return { inserted: n, param: which };
+        return _insertAutomationPoints(byU, paramProxy, which, pts);
     });
     return { queued: pts.length, param: which, note: "async; outcome in openwig_bridge.log [auto]" };
 }
@@ -672,41 +982,677 @@ function automationWriteOffline(p) {
 // cxu_2.r3B(UO1, List) (cxu_2.java:82 -> cxr_22.Xzy((XDd)uO1, this.ngq(), list)). Replaces
 // the wire path (mitm_daemon + port 7880) end-to-end. Cursor track must be selected first.
 //   p: { start: beats, duration: beats, notes: [[channel, key, start, dur, vel], ...] }
+// Core arranger-clip create + note fill. MUST run on the document-edit thread. Calls the
+// same GUI commands the wire ops would dispatch, reached via internal command objects.
+// Extracted so the public handler and the resolver self-test share one path.
+// Returns { created, notes, start, duration }.
+// Resolve a command spec {cls, field, factory, exec} into { cmd, exec(Method) }. The field
+// is a static singleton, factory() yields the command, exec(target, List) dispatches it.
+function _findField(cls, name) {
+    var c = cls; while (c != null) { try { return c.getDeclaredField(name); } catch (e) {} c = c.getSuperclass(); }
+    return null;
+}
+function _cmdResolve(spec) {
+    var clsObj = Java.type(spec.cls).class;
+    var fld = _findField(clsObj, spec.field); if (fld == null) throw "command field " + spec.cls + "." + spec.field + " not found";
+    fld.setAccessible(true);
+    var holder = fld.get(null); if (holder == null) throw "command field " + spec.field + " is null";
+    var cmd = _invokeNoArg(holder, spec.factory);
+    var em = _findMethod(_classOf(cmd), spec.exec, 2, null);
+    if (em == null) throw "command exec " + spec.exec + " not found";
+    return { cmd: cmd, exec: em };
+}
+function _insertClip(byU, start, dur, notes) {
+    var ArrayList = Java.type("java.util.ArrayList");
+    var Dbl = Java.type("java.lang.Double"), Int = Java.type("java.lang.Integer");
+    var args1 = new ArrayList();
+    args1.add(Dbl.valueOf(start)); args1.add(Dbl.valueOf(dur));
+    var cc = _cmdResolve(SYM.clipCmd);                    // op-id-resolved (seed default = X2S)
+    var clipDoc = cc.exec.invoke(cc.cmd, byU, args1);
+    if (clipDoc == null) throw "clip create returned null";
+    var nc = _cmdResolve(SYM.noteCmd);                    // op-id-resolved (seed default = alU)
+    for (var i = 0; i < notes.length; i++) {
+        var n = notes[i];
+        var args2 = new ArrayList();
+        args2.add(Int.valueOf(n[0] | 0));            // channel
+        args2.add(Int.valueOf(n[1] | 0));            // key
+        args2.add(Dbl.valueOf(Number(n[2])));        // start_in_clip
+        args2.add(Dbl.valueOf(Number(n[3])));        // duration
+        args2.add(Dbl.valueOf(Number(n[4])));        // velocity
+        nc.exec.invoke(nc.cmd, clipDoc, args2);
+    }
+    return { created: 1, notes: notes.length, start: start, duration: dur };
+}
+
+// ── arranger audio-clip insert ──────────────────────────────────────────────────
+// ArrangerClipInsertionPoint (ACIP) is a STABLE class. Resolve its 5-arg constructor, its
+// (File, mode, hook)->ok dispatch method (the only inherited method whose first arg is a
+// File), the mode class (dispatch param[1]) and the mode singleton (the mode class's only
+// self-typed static field). The track-as-HrV accessor name comes from SYM.audio.hrv (data /
+// cache / validated by doctor). All structural except the HrV accessor.
+function _acipParts() {
+    var ACIP = Java.type(ACIP_CLASS).class, FileC = Java.type("java.io.File").class;
+    var ctors = ACIP.getDeclaredConstructors(), ctor = null;
+    for (var i = 0; i < ctors.length; i++) if (ctors[i].getParameterCount() === 5) { ctor = ctors[i]; break; }
+    if (ctor == null) throw "ACIP 5-arg constructor not found";
+    ctor.setAccessible(true);
+    var dispatch = null, c = ACIP;
+    while (c != null && dispatch == null) {
+        var ms = c.getDeclaredMethods();
+        for (var j = 0; j < ms.length; j++) {
+            var m = ms[j], ps = m.getParameterTypes();
+            if (ps.length === 3 && FileC.isAssignableFrom(ps[0])) { m.setAccessible(true); dispatch = m; break; }
+        }
+        c = c.getSuperclass();
+    }
+    if (dispatch == null) throw "ACIP file-dispatch method not found";
+    var zjsType = dispatch.getParameterTypes()[1];
+    var Mod = Java.type("java.lang.reflect.Modifier"), mode = null;
+    // Prefer the known-good mode field from the data/cache: getDeclaredFields() order is
+    // unspecified, so if the mode class ever carries several self-typed constants
+    // (insert/replace/ask) the structural first-match could pick the wrong one.
+    var modeHint = (!gBlindDiscovery && SYM.audio && SYM.audio.modeField) ? ("" + SYM.audio.modeField) : null;
+    if (modeHint) {
+        try {
+            var hf = zjsType.getDeclaredField(modeHint);
+            if (Mod.isStatic(hf.getModifiers()) && zjsType.isAssignableFrom(hf.getType())) {
+                hf.setAccessible(true); mode = hf.get(null);
+            }
+        } catch (e) {}
+    }
+    if (mode == null) {
+        var zfs = zjsType.getDeclaredFields();
+        for (var k = 0; k < zfs.length; k++) {
+            if (Mod.isStatic(zfs[k].getModifiers()) && zjsType.isAssignableFrom(zfs[k].getType())) {
+                try { zfs[k].setAccessible(true); mode = zfs[k].get(null); } catch (e) {}
+                if (mode != null) break;
+            }
+        }
+    }
+    if (mode == null) throw "audio-insert mode constant not found";
+    return { ctor: ctor, dispatch: dispatch, mode: mode, hrvType: ctor.getParameterTypes()[0] };
+}
+function _insertAudioClip(byU, path, start, dur, hrvName) {
+    var P = _acipParts(), File = Java.type("java.io.File"), Dbl = Java.type("java.lang.Double");
+    var hn = hrvName || SYM.audio.hrv;
+    var hrv = _invokeNoArg(byU, hn);
+    if (hrv == null) throw "track-as-HrV accessor '" + hn + "' returned null";
+    var aip = P.ctor.newInstance(hrv, Dbl.valueOf(start), Dbl.valueOf(dur), null, null);
+    var ok = P.dispatch.invoke(aip, new File(path), P.mode, null);
+    return { dispatched: !!ok };
+}
+// Shared body for the public `track.insert_audio_clip` op and doctor's gate-exempt
+// `resolver.audio_probe_insert` alias (so the public op stays gated like any reflection-
+// dependent mutation, while doctor can still validate the path on its throwaway track).
+function _audioInsertHandler(p) {
+    var trackIdx = bget(p, "track", 0) | 0;
+    var path = "" + bget(p, "path", "");
+    var start = Number(bget(p, "start", 0)), dur = Number(bget(p, "duration", 4));
+    var hrvOverride = p.hrv ? ("" + p.hrv) : null;
+    if (!path) return { error: "no path" };
+    _runOnDocumentThread(cursorTrack, function () {
+        var trackDoc = trackBank.getItemAt(trackIdx).getDeepestTarget();
+        if (trackDoc == null) throw "track " + trackIdx + " has no document target";
+        return _insertAudioClip(trackDoc, path, start, dur, hrvOverride);
+    });
+    return { queued: true, path: path, note: "async; outcome in openwig_bridge.log [auto]" };
+}
+
 function _clipCreateAndFill(p) {
     var start = Number(p.start || 0), dur = Number(p.duration || 4);
     var notes = p.notes || [];
     _runOnDocumentThread(cursorTrack, function () {
         var byU = cursorTrack.getDeepestTarget();
         if (byU == null) throw "no track target (select a track first)";
-        // alU = real class (CFR renamed source file to alu_1.java to avoid case-insensitive
-        // FS collision with sibling classes alu / aLu / aLU - all four exist in default pkg).
-        var X2S = Java.type("X2S"), alu1 = Java.type("alU");
-        var ArrayList = Java.type("java.util.ArrayList");
-        var Dbl = Java.type("java.lang.Double"), Int = Java.type("java.lang.Integer");
-        var args1 = new ArrayList();
-        args1.add(Dbl.valueOf(start)); args1.add(Dbl.valueOf(dur));
-        var clipDoc = X2S.fiU.qgm().r3B(byU, args1);
-        if (clipDoc == null) throw "clip create returned null";
-        var cmdNote = alu1.r3B.XaN();
-        for (var i = 0; i < notes.length; i++) {
-            var n = notes[i];
-            var args2 = new ArrayList();
-            args2.add(Int.valueOf(n[0] | 0));            // channel
-            args2.add(Int.valueOf(n[1] | 0));            // key
-            args2.add(Dbl.valueOf(Number(n[2])));        // start_in_clip
-            args2.add(Dbl.valueOf(Number(n[3])));        // duration
-            args2.add(Dbl.valueOf(Number(n[4])));        // velocity
-            cmdNote.r3B(clipDoc, args2);
-        }
-        return { created: 1, notes: notes.length, start: start, duration: dur };
+        return _insertClip(byU, start, dur, notes);
     });
     return { queued: notes.length, start: start, duration: dur, note: "async; outcome in openwig_bridge.log [auto]" };
+}
+
+// ── name-free (structural) discovery of the descriptor-reader cluster ───────────
+// The reader walks the document graph via obfuscated methods: uo1.mX_() -> container,
+// container.KRt() -> descriptor list, container.bf() -> class name, and per descriptor
+// ngq() (numeric prop id), nI_() (is-serialized), Xzy(uo1) (scalar value), uEK(uo1,String)
+// (child relationship). We rediscover these by SHAPE + BEHAVIOUR, anchored on a known
+// document object (a track target), so the read path survives re-obfuscation.
+var _JLIST = null;
+function _listClass() { if (_JLIST == null) _JLIST = Java.type("java.util.List").class; return _JLIST; }
+function _isNumericStr(s) {
+    if (s == null) return false; s = "" + s; if (!s.length) return false;
+    for (var i = 0; i < s.length; i++) { var c = s.charCodeAt(i); if (c < 48 || c > 57) return false; }
+    return true;
+}
+// The shape isn't unique, so discovery gathers CANDIDATE name-sets and the caller validates
+// each by execution (walk, look for known sentinels). A candidate carries several Xzy
+// (value-getter) options because the right one can only be told apart behaviourally.
+function _descriptorShape(d0) {
+    var dCls; try { dCls = _classOf(d0); } catch (e) { return null; }
+    var numOpts = [], boolNoArg = [], xzyOpts = [], uEK = null, c = dCls, seen = {};
+    while (c != null) {
+        var ms = c.getDeclaredMethods();
+        for (var i = 0; i < ms.length; i++) {
+            var m = ms[i], nm = "" + m.getName(); if (seen[nm]) continue; seen[nm] = 1;
+            var pc = m.getParameterCount(), rt = m.getReturnType(), rtn = "" + rt.getName();
+            if (pc === 0) {
+                if (rtn === "boolean") boolNoArg.push(nm);
+                else if (rtn === "java.lang.String") numOpts.push({ name: nm, str: true });
+                else if (rtn === "int" || rtn === "long" || rtn === "short") numOpts.push({ name: nm, str: false });
+            } else if (pc === 1 && !rt.isPrimitive() && rt !== java.lang.Void.TYPE && !m.getParameterTypes()[0].isPrimitive()) xzyOpts.push(nm);
+            else if (pc === 2 && ("" + m.getParameterTypes()[1].getSimpleName()) === "String") uEK = nm;
+        }
+        c = c.getSuperclass();
+    }
+    if (uEK == null || !xzyOpts.length) return null;   // ngq not required to validate the skeleton
+    // ngq (prop id) candidates: no-arg methods returning a numeric value (String-numeric or
+    // int/long/short). The exact one is chosen later by value-uniqueness across the container.
+    var ngqOpts = [];
+    for (var k = 0; k < numOpts.length; k++) {
+        try {
+            var v = _invokeNoArg(d0, numOpts[k].name);
+            if (numOpts[k].str) { if (_isNumericStr(v)) ngqOpts.push(numOpts[k].name); }
+            else if (v != null) ngqOpts.push(numOpts[k].name);
+        } catch (e) {}
+    }
+    var nI_ = null;                                   // no-arg boolean (is-serialized): true on serialized props
+    for (var b = 0; b < boolNoArg.length; b++)
+        try { if (_invokeNoArg(d0, boolNoArg[b]) === true) { nI_ = boolNoArg[b]; break; } } catch (e) {}
+    if (nI_ == null && boolNoArg.length) nI_ = boolNoArg[0];
+    return { ngqOpts: ngqOpts, nI_: nI_, uEK: uEK, xzyOpts: xzyOpts };
+}
+// All candidate reader name-sets reachable from uo1 (each carries xzyOpts to be validated).
+function _readerCandidates(uo1) {
+    var out = [], c = _classOf(uo1), seenG = {};
+    while (c != null) {
+        var ms = c.getDeclaredMethods();
+        for (var i = 0; i < ms.length; i++) {
+            var g = ms[i]; if (g.getParameterCount() !== 0) continue;
+            var gn = "" + g.getName(); if (seenG[gn]) continue; seenG[gn] = 1;
+            var rt = g.getReturnType(); if (rt.isPrimitive() || rt === java.lang.Void.TYPE || rt.isArray()) continue;
+            var cwo; try { cwo = _invokeNoArg(uo1, gn); } catch (e) { continue; }
+            if (cwo == null) continue;
+            var cwoCls; try { cwoCls = _classOf(cwo); } catch (e) { continue; }
+            var listM = [], strM = [], cc = cwoCls, seenM = {};
+            while (cc != null) {
+                var ms2 = cc.getDeclaredMethods();
+                for (var j = 0; j < ms2.length; j++) {
+                    var m = ms2[j]; if (m.getParameterCount() !== 0) continue;
+                    var nm = "" + m.getName(); if (seenM[nm]) continue; seenM[nm] = 1;
+                    var r = m.getReturnType();
+                    if (_listClass().isAssignableFrom(r)) listM.push(nm);
+                    else if (("" + r.getName()) === "java.lang.String") strM.push(nm);
+                }
+                cc = cc.getSuperclass();
+            }
+            for (var l = 0; l < listM.length; l++) {
+                var lst; try { lst = _invokeNoArg(cwo, listM[l]); } catch (e) { continue; }
+                if (lst == null) continue;
+                var sz; try { sz = lst.size(); } catch (e) { continue; }
+                if (sz === 0) continue;
+                // the descriptor list is heterogeneous: sample several elements to find a
+                // RICH descriptor (numeric ngq + uEK relationship) that yields the full shape.
+                var sh = null, lim = Math.min(sz, 60);
+                for (var di = 0; di < lim && !sh; di++) {
+                    var dx; try { dx = lst.get(di); } catch (e) { continue; }
+                    if (dx != null) sh = _descriptorShape(dx);
+                }
+                if (!sh) continue;
+                var bf = null;
+                for (var s = 0; s < strM.length; s++)
+                    try { var v = _invokeNoArg(cwo, strM[s]); if (v != null && ("" + v).length && !_isNumericStr(v)) { bf = strM[s]; break; } } catch (e) {}
+                out.push({ mX_: gn, KRt: listM[l], bf: bf, nI_: sh.nI_, uEK: sh.uEK, xzyOpts: sh.xzyOpts, ngqOpts: sh.ngqOpts });
+            }
+        }
+        c = c.getSuperclass();
+    }
+    return out;
+}
+// Bounded recursive walk using a candidate name-set N; pushes scalar values (as strings)
+// into `sink`. Mirrors _walkObj's logic: relationship (uEK non-null) -> recurse; else read Xzy.
+function _walkWith(uo1, N, xzy, depth, maxDepth, budget, sink, seen) {
+    if (budget.n <= 0 || uo1 == null || depth > maxDepth) return;
+    if (_IHC == null) _IHC = Java.type("java.lang.System");
+    var id; try { id = _IHC.identityHashCode(uo1); } catch (e) { id = 0; }
+    if (seen[id]) return; seen[id] = 1;                 // dedup: the document graph has cycles
+    var cwo; try { cwo = _invokeNoArg(uo1, N.mX_); } catch (e) { return; }
+    if (cwo == null) return;
+    var lst; try { lst = _invokeNoArg(cwo, N.KRt); } catch (e) { return; }
+    if (lst == null) return;
+    var sz; try { sz = lst.size(); } catch (e) { return; }
+    for (var i = 0; i < sz && budget.n > 0; i++) {
+        var d; try { d = lst.get(i); } catch (e) { continue; }
+        budget.n--;
+        var kids = null;                                 // relationship children: uEK(uo1, String)
+        try { var km = _findMethod(_classOf(d), N.uEK, 2, "String"); if (km) kids = km.invoke(d, uo1, null); } catch (e) { kids = null; }
+        if (kids != null) {
+            var nk; try { nk = kids.size(); } catch (e) { nk = 0; }
+            for (var k = 0; k < nk && budget.n > 0; k++) {
+                var ch; try { ch = kids.get(k); } catch (e) { continue; }
+                _walkWith(ch, N, xzy, depth + 1, maxDepth, budget, sink, seen);
+            }
+        } else {
+            try { var v = _inv1(d, xzy, uo1); if (v != null) sink.push("" + v); } catch (e) {}
+        }
+    }
+}
+// The prop-id getter (ngq): of the numeric no-arg candidates, the one whose values across
+// the container's descriptors are the most DISTINCT (each property carries a unique id).
+function _selectNgq(cwo, KRt, ngqOpts) {
+    if (!ngqOpts || !ngqOpts.length) return null;
+    var lst; try { lst = _invokeNoArg(cwo, KRt); } catch (e) { return ngqOpts[0]; }
+    if (lst == null) return ngqOpts[0];
+    var sz; try { sz = lst.size(); } catch (e) { return ngqOpts[0]; }
+    var best = ngqOpts[0], bestDistinct = -1;
+    for (var o = 0; o < ngqOpts.length; o++) {
+        var vals = {}, distinct = 0;
+        for (var i = 0; i < sz; i++) {
+            var d; try { d = lst.get(i); } catch (e) { continue; }
+            try { var v = _invokeNoArg(d, ngqOpts[o]); if (v != null && !vals["" + v]) { vals["" + v] = 1; distinct++; } } catch (e) {}
+        }
+        if (distinct > bestDistinct) { bestDistinct = distinct; best = ngqOpts[o]; }
+    }
+    return best;
+}
+// Resolve the reader. Without `forceStructural`: TRUST the SYM mapping (loaded from the
+// validated cache or the shipped data file) - it is the canonical reader on a supported build,
+// and the caller validates it via the descriptor-read sentinel check (re-resolving structurally
+// only if that fails). With forceStructural (or blind mode): pure structural discovery, picking
+// the candidate whose walk surfaces the most sentinels. Returns the reader name-set or null.
+function _discoverReader(uo1, sentinels, forceStructural) {
+    if (!forceStructural && !gBlindDiscovery && SYM.mX_ && SYM.KRt && SYM.uEK && SYM.Xzy) {
+        return { mX_: SYM.mX_, KRt: SYM.KRt, bf: SYM.bf, ngq: SYM.ngq, nI_: SYM.nI_, Xzy: SYM.Xzy, uEK: SYM.uEK };
+    }
+    // structural (blind, no mapping, or the trusted mapping failed validation): among the
+    // candidates whose walk surfaces a sentinel, pick the RICHEST (most scalars). The richest
+    // walk is the most COMPLETE reader (reaches notes + automation), matching the canonical
+    // reader instead of a partial alias.
+    var cands = _readerCandidates(uo1), _bestN = null, _bestXzy = null, _bestScalars = -1, _bestHits = -1;
+    for (var ci = 0; ci < cands.length; ci++) {
+        var N = cands[ci];
+        for (var xi = 0; xi < N.xzyOpts.length; xi++) {
+            var xzy = N.xzyOpts[xi], sink = [], budget = { n: 9000 };
+            try { _walkWith(uo1, N, xzy, 0, 16, budget, sink, {}); } catch (e) { continue; }
+            var blob = sink.join(""), nhit = 0;
+            for (var s = 0; s < sentinels.length; s++) if (blob.indexOf(sentinels[s]) >= 0) nhit++;
+            if (nhit > 0 && (nhit > _bestHits || (nhit === _bestHits && sink.length > _bestScalars))) {
+                _bestHits = nhit; _bestScalars = sink.length; _bestN = N; _bestXzy = xzy;
+            }
+        }
+    }
+    if (_bestN == null) return null;
+    var cwoN; try { cwoN = _invokeNoArg(uo1, _bestN.mX_); } catch (e) { cwoN = null; }
+    var ngq = cwoN ? _selectNgq(cwoN, _bestN.KRt, _bestN.ngqOpts) : (_bestN.ngqOpts[0] || null);
+    return { mX_: _bestN.mX_, KRt: _bestN.KRt, bf: _bestN.bf, ngq: ngq, nI_: _bestN.nI_, Xzy: _bestXzy, uEK: _bestN.uEK };
+}
+
+// ── symbol cache: doctor resolves + validates the reader names, persists them keyed by a
+// build fingerprint; the bridge loads them at init. The reader is the one path that cannot
+// self-validate during a plain read (no sentinel to check against), so it relies on the
+// cache; automation/clip resolve + validate live on every write.
+var _CACHE_SCHEMA = 4;   // bump invalidates old caches (4: +fj/szFilter/autoLanes, write gated on full self-test)
+function _fingerprint() {
+    var parts = [];
+    try { parts.push("v=" + host.getHostVersion()); } catch (e) {}
+    try {
+        var loc = host.getClass().getProtectionDomain().getCodeSource().getLocation();
+        var f = new (Java.type("java.io.File"))(loc.toURI());
+        parts.push("len=" + f.length()); parts.push("mt=" + f.lastModified());
+    } catch (e) { parts.push("nojar"); }
+    parts.push("schema=" + _CACHE_SCHEMA);
+    return parts.join("|");
+}
+function _cachePath() { return ("" + LOG_FILE).replace(/openwig_bridge\.log$/, "symbols_cache.json"); }
+function _writeCache(obj) {
+    try {
+        var BW = Java.type("java.io.BufferedWriter"), FW = Java.type("java.io.FileWriter");
+        var w = new BW(new FW(_cachePath(), false));
+        w.write(JSON.stringify(obj)); w.newLine(); w.flush(); w.close();
+        return true;
+    } catch (e) { flog("symbol cache write failed: " + e); return false; }
+}
+function _readCache() { return _readJson(_cachePath()); }
+// Apply a validated reader name-set into SYM (called from a mapping and from the probe).
+function _applyReaderNames(rd) {
+    if (!rd) return;
+    if (rd.mX_) SYM.mX_ = rd.mX_; if (rd.KRt) SYM.KRt = rd.KRt; if (rd.bf) SYM.bf = rd.bf;
+    if (rd.ngq) SYM.ngq = rd.ngq; if (rd.nI_) SYM.nI_ = rd.nI_; if (rd.Xzy) SYM.Xzy = rd.Xzy;
+    if (rd.uEK) SYM.uEK = rd.uEK;
+}
+// Apply a command spec {cls,field,factory,exec} into SYM (preserving the opid).
+function _applyCommandSpec(target, spec) {
+    if (!spec || !spec.cls) return;
+    target.cls = spec.cls; target.field = spec.field; target.factory = spec.factory; target.exec = spec.exec;
+}
+// Merge a symbol mapping (from the bootstrap data file OR the per-build cache) into SYM.
+function _applyMapping(d) {
+    if (!d) return;
+    _applyReaderNames(d.reader);
+    if (d.fj) SYM.fj = d.fj;
+    if (d.SZo) SYM.SZo = d.SZo;
+    if (d.autoLanes) SYM.autoLanes = d.autoLanes;
+    if (d.szFilter) SYM.szFilter = d.szFilter;
+    if (d.clipCmd) _applyCommandSpec(SYM.clipCmd, d.clipCmd), (SYM.clipCmd.opid = d.clipCmd.opid);
+    if (d.noteCmd) _applyCommandSpec(SYM.noteCmd, d.noteCmd), (SYM.noteCmd.opid = d.noteCmd.opid);
+    if (d.audio && d.audio.hrv) SYM.audio = d.audio;
+}
+function _readJson(path) {
+    try {
+        var F = Java.type("java.io.File"), f = new F(path);
+        if (!f.exists()) return null;
+        var bytes = Java.type("java.nio.file.Files").readAllBytes(f.toPath());
+        return JSON.parse("" + new JString(bytes, Charset.UTF_8));
+    } catch (e) { flog("read json failed (" + path + "): " + e); return null; }
+}
+function _defaultsPath() { return ("" + LOG_FILE).replace(/openwig_bridge\.log$/, "symbols_default.json"); }
+// init-time: load the bootstrap DATA mapping, then override with doctor's per-build cache
+// (only when its fingerprint matches THIS build). No obfuscated names live in code.
+function _loadSymbols() {
+    var hadDefaults = false;
+    var d = _readJson(_defaultsPath());
+    if (d) { _applyMapping(d); hadDefaults = true; }
+    var c = _readCache();
+    if (c && c.fingerprint === _fingerprint() && c.reader) {
+        _applyMapping(c);
+        gSymSource = "cache";
+    } else if (hadDefaults) {
+        gSymSource = c ? "defaults (cache stale; re-run doctor)" : "defaults (run doctor to validate + cache)";
+    } else {
+        gSymSource = "UNRESOLVED (run openwig install + doctor)";
+    }
+}
+
+// ── resolver / self-test (run by `openwig doctor`) ──────────────────────────────
+// The reflection paths above hardcode Bitwig's obfuscated class/method names. Those names
+// are stable for a given Bitwig build but are re-obfuscated each release, so they can move
+// from one version to the next. This self-test VERIFIES, on a throwaway track, that the
+// paths still work on the LIVE build: it round-trips an arranger automation write, an
+// arranger clip+note, and a descriptor read, checking that each landed (distinctive
+// sentinel values must reappear in the descriptor walk). It fails SAFE - a broken path is
+// reported, never silently corrupting a project - and reports which obfuscated classes
+// still load, so an unsupported build yields an actionable report instead of a crash.
+
+function _hostInfo() {
+    var out = {};
+    try { out.product = "" + host.getHostProduct(); } catch (e) {}
+    try { out.vendor  = "" + host.getHostVendor();  } catch (e) {}
+    try { out.version = "" + host.getHostVersion(); } catch (e) {}
+    try { out.api_version = host.getHostApiVersion(); } catch (e) {}
+    return out;
+}
+
+// Verify the obfuscated classes the bridge actually depends on still load - derived from the
+// RESOLVED symbols (SYM + the discovered automation cluster), not a hardcoded list, so this
+// reflects whatever was discovered/cached for this build. A renamed-and-unresolved class
+// shows up here as failing to load.
+function _resolverClasses() {
+    var out = {}, names = [SYM.fj, SYM.SZo];
+    if (SYM.clipCmd && SYM.clipCmd.cls) names.push(SYM.clipCmd.cls);
+    if (SYM.noteCmd && SYM.noteCmd.cls) names.push(SYM.noteCmd.cls);
+    if (_AUTO_SYM) { try { names.push("" + _AUTO_SYM.avr.getName()); } catch (e) {}
+                     try { names.push("" + _AUTO_SYM.interp.getName()); } catch (e) {} }
+    for (var i = 0; i < names.length; i++) {
+        var nm = names[i]; if (nm == null || out[nm] !== undefined) continue;
+        try { Java.type(nm); out[nm] = true; } catch (e) { out[nm] = false; }
+    }
+    return out;
+}
+
+// sentinels: distinctive constants we write, then look for in the descriptor-walk JSON.
+// NB: automation TIMES (beat positions) and the note START are stored as TIMES we can search
+// for; an automation VALUE and a note velocity are stored normalized and are NOT searchable -
+// hence we verify by the distinctive TIME. Bitwig stores these times as 32-bit floats, so the
+// double we write is widened back from float32 (e.g. 1.6180339 -> 1.6180343627929688). We
+// therefore search for the float32 form (Math.fround), trimmed to a stable leading prefix, so
+// the match survives that rounding instead of depending on the exact decimal we sent.
+var _SENT_AUTO_T = 1.4142135, _SENT_AUTO_T2 = 2.2360679;        // sqrt2, sqrt5 (beat positions)
+var _SENT_NOTE_START = 1.6180339, _SENT_NOTE_VEL = 0.6789, _SENT_NOTE_KEY = 61;  // golden ratio
+// float32-safe searchable form: nearest-float32 string, first 7 chars ("N.NNNNN") - distinctive
+// (irrational constants) yet robust to the last-digit rounding the float storage introduces.
+function _sentStr(x) { return ("" + Math.fround(x)).slice(0, 7); }
+var _SENT_AUTO_S = _sentStr(_SENT_AUTO_T), _SENT_AUTO_S2 = _sentStr(_SENT_AUTO_T2);
+var _SENT_NOTE_S = _sentStr(_SENT_NOTE_START);
+
+function _walkTrackJSON(byU) {
+    var budget = { n: 9000 };
+    var opts = { prune: {}, noFilter: false, seen: {}, noDedup: {} };
+    return JSON.stringify(_walkObj(byU, 0, 16, budget, opts));
+}
+
+// Runs on the document-edit thread (inside resolver.probe's exec). Mutates ONLY the
+// currently-selected track, which the caller has created as a throwaway and deletes after.
+function _runResolverProbe() {
+    var report = {
+        bitwig: _hostInfo(),
+        classes: _resolverClasses(),
+        capabilities: {
+            automation_write: { ok: false, detail: "" },
+            clip_create:      { ok: false, detail: "" },
+            descriptor_read:  { ok: false, detail: "" },
+            serialize:        { ok: false, detail: "" },
+            normalize:        { ok: false, detail: "" }
+        },
+        ok: false
+    };
+    var byU = cursorTrack.getDeepestTarget();
+    if (byU == null) { report.error = "no track target (probe track not selected)"; return report; }
+
+    // 1. arranger automation write (self-discovered, name-free).
+    try {
+        var r = _insertAutomationPoints(byU, function () { return cursorTrack.volume(); }, "volume",
+            [[_SENT_AUTO_T, 0.3], [_SENT_AUTO_T2, 0.7]]);
+        report.capabilities.automation_write.detail = "inserted " + r.inserted + " (" + r.via + ")";
+        report.capabilities.automation_write.via = r.via;
+    } catch (e) { report.capabilities.automation_write.detail = "insert failed: " + e; }
+
+    // 1.5 resolve the clip-create + note-insert command hosts by stable op-id (jar scan,
+    //     doctor-only, self-contained: reads each command's numeric op-id directly, no reader
+    //     dependency). Skipped in blind mode. On success SYM.clipCmd/noteCmd are resolved.
+    if (!gBlindDiscovery) {
+        if (SYM.clipCmd.opid == null || SYM.noteCmd.opid == null) {
+            report.commands_err = "command op-ids missing (symbols_default.json not installed? re-run openwig install)";
+        } else {
+            try {
+                var got = _findCommandsByOpIds([SYM.clipCmd.opid, SYM.noteCmd.opid], null);
+                var gc = got["" + SYM.clipCmd.opid], gn = got["" + SYM.noteCmd.opid];
+                if (gc) _applyCommandSpec(SYM.clipCmd, gc);
+                if (gn) _applyCommandSpec(SYM.noteCmd, gn);
+                report.commands = { clipCmd: SYM.clipCmd, noteCmd: SYM.noteCmd, resolved: !!(gc && gn),
+                                    instantiated: _gCmdScanInstantiated };
+            } catch (e) { report.commands_err = "" + e; }
+        }
+    }
+
+    // 2. arranger clip + one note (via the resolved command hosts).
+    try {
+        var c = _insertClip(byU, 0.0, 4.0, [[0, _SENT_NOTE_KEY, _SENT_NOTE_START, 0.5, _SENT_NOTE_VEL]]);
+        report.capabilities.clip_create.detail = "created clip, " + c.notes + " note(s)";
+    } catch (e) { report.capabilities.clip_create.detail = "create failed: " + e; }
+
+    // 2.5 reader: trust the SYM mapping (validated cache / shipped data); the descriptor read
+    //     below validates it against the automation + note sentinels just written.
+    var SENT = [_SENT_AUTO_S, _SENT_AUTO_S2, _SENT_NOTE_S];
+    var rd = null;
+    try { rd = _discoverReader(byU, SENT, false); } catch (e) { report.reader_err = "" + e; }
+    if (rd) { _applyReaderNames(rd); report.reader = rd; }
+
+    // 3. descriptor read-back + sentinel verification. If the trusted reader does NOT surface
+    //    both sentinels (a build where the mapping moved), re-resolve the reader STRUCTURALLY
+    //    and walk again. autoFound = automation point; noteFound = clip note.
+    var json = null, autoFound = false, noteFound = false;
+    var walkCheck = function () {
+        try { json = _walkTrackJSON(byU); } catch (e) { json = null; report.capabilities.descriptor_read.detail = "walk failed: " + e; return; }
+        autoFound = json.indexOf(_SENT_AUTO_S) >= 0 || json.indexOf(_SENT_AUTO_S2) >= 0;
+        noteFound = json.indexOf(_SENT_NOTE_S) >= 0;
+    };
+    walkCheck();
+    if (json != null && !(autoFound && noteFound) && !gBlindDiscovery) {
+        var rd2 = null; try { rd2 = _discoverReader(byU, SENT, true); } catch (e) {}
+        if (rd2) { _applyReaderNames(rd2); report.reader = rd2; rd = rd2; walkCheck(); }
+    }
+    if (json != null) {
+        // A broken reader still yields short non-empty JSON ({_err: ...} / {_noazd: ...}), so
+        // "non-trivial output" is NOT validation. The reader is verified only if the walk
+        // surfaced at least one sentinel we just wrote (a real read-back of real data).
+        report.capabilities.descriptor_read.ok = (autoFound || noteFound);
+        report.capabilities.descriptor_read.detail = "walk " + json.length + " chars" +
+            ((autoFound || noteFound) ? " | sentinel verified" : " | no sentinel surfaced (reader NOT verified)");
+        if (report.capabilities.automation_write.detail.indexOf("inserted") === 0)
+            report.capabilities.automation_write.ok = autoFound;
+        report.capabilities.automation_write.detail += autoFound ? " | verified" : " | sentinel NOT found";
+        if (report.capabilities.clip_create.detail.indexOf("created") === 0)
+            report.capabilities.clip_create.ok = noteFound;
+        report.capabilities.clip_create.detail += noteFound ? " | verified" : " | sentinel NOT found";
+    }
+
+    // 4. serialize filter: the SZo filter the descriptor reader uses to decide which properties
+    //    are serialized. Confirm the SZo class loads and the filter (SYM.szFilter) classifies a
+    //    real descriptor (returns a boolean for a true property, false for the dedup sentinel).
+    try {
+        Java.type(SYM.SZo);                          // class must load
+        _SZFILT = null;                              // force re-resolve from SYM.szFilter
+        var cwoS = _mx(byU), dl = _descriptors(cwoS);
+        var classified = false;
+        if (dl && dl.size() > 0) { _szPass(dl.get(0), byU); classified = (_SZFILT !== null && _SZFILT !== false); }
+        report.capabilities.serialize.ok = classified;
+        report.capabilities.serialize.detail = classified ? ("filter ok (" + SYM.szFilter.method + ")") : "filter not resolved";
+    } catch (e) { report.capabilities.serialize.detail = "failed: " + e; }
+
+    // 5. normalize: resolve a parameter's native->0..1 normalize fn (structural, behavioural).
+    //    Underpins device.remote_normalize and exact automation/breakpoint value conversion.
+    try {
+        var vp = cursorTrack.volume();
+        var vdt = vp.getDeepestTarget();
+        var vfj = _fjFrom(_invokeNoArg(vdt, "getAtom")); if (vfj == null) vfj = _fjFrom(vdt);
+        if (vfj == null) throw "no fj for volume";
+        var curN = vp.value().getRaw(), curNorm = vp.value().get();
+        var nf = _findNormalizeFn(vfj, curN, curNorm);
+        report.capabilities.normalize.ok = (nf != null);
+        report.capabilities.normalize.detail = nf ? ("resolved " + nf.getName() + "()") : "no normalize fn found";
+    } catch (e) { report.capabilities.normalize.detail = "failed: " + e; }
+
+    // structurally-discovered automation symbols (for transparency + crowdsourced maps):
+    // these names should match the hardcoded ones on a supported build.
+    if (_AUTO_SYM) {
+        report.discovered = {
+            al_accessor: "" + _AUTO_SYM.alAccessor,
+            insert: "" + _AUTO_SYM.insert.getName(),
+            value_ref: "" + _AUTO_SYM.avr.getName(),
+            factory: "" + _AUTO_SYM.factory.getName(),
+            value_base: "" + _AUTO_SYM.fjClass.getName(),
+            interp_enum: "" + _AUTO_SYM.interp.getName(),
+            interp_resolved: _AUTO_SYM.interpResolved
+        };
+    }
+
+    var caps = report.capabilities;
+    report.ok = caps.automation_write.ok && caps.clip_create.ok && caps.descriptor_read.ok &&
+                caps.serialize.ok && caps.normalize.ok;
+
+    // persist the validated symbols so the bridge can use them at read time (no cache in
+    // blind/test mode). Gated on the FULL self-test: a cache opens the mandatory-doctor gate
+    // for every op (this session and, via the fingerprint match, all future sessions), so it
+    // must only exist when every capability verified. The cache carries everything
+    // _applyMapping needs to reproduce a working session: reader, fj, SZo, szFilter,
+    // autoLanes (the discovered+validated lanes accessor), commands and audio.
+    if (!gBlindDiscovery && rd && report.ok) {
+        var cacheObj = {
+            schema: _CACHE_SCHEMA, fingerprint: _fingerprint(), bitwig: report.bitwig,
+            reader: rd, fj: SYM.fj, SZo: SYM.SZo, szFilter: SYM.szFilter,
+            autoLanes: (_AUTO_SYM ? ("" + _AUTO_SYM.alAccessor) : SYM.autoLanes),
+            clipCmd: SYM.clipCmd, noteCmd: SYM.noteCmd, audio: SYM.audio,
+            verdicts: { automation: caps.automation_write.ok, clip: caps.clip_create.ok,
+                        descriptor: caps.descriptor_read.ok, serialize: caps.serialize.ok, normalize: caps.normalize.ok }
+        };
+        var wrote = _writeCache(cacheObj);
+        gSymSource = wrote ? "discovered+cached" : "discovered";
+        report.cache = { written: wrote, path: _cachePath(), fingerprint: cacheObj.fingerprint };
+        if (!wrote) report.cache.reason = "cache write FAILED (data dir not writable?) - the gate stays shut; see " + LOG_FILE;
+    } else {
+        report.cache = { written: false, reason: gBlindDiscovery ? "blind mode" :
+            (rd ? "self-test failed (cache withheld so the gate stays shut)" : "reader not discovered") };
+    }
+    report.symbol_source = gSymSource;
+    _JAR_CLASSES = null;   // doctor-only data: free the (large) jar class-name list
+    return report;
 }
 
 var HANDLERS = {
 
     // ── meta ──
     "ping": function () { return "pong"; },
+    // ── resolver / self-test (driven by `openwig doctor`) ──
+    // Cheap, synchronous: which obfuscated classes still load on this build (no doc thread).
+    "resolver.classes": function () { return { bitwig: _hostInfo(), classes: _resolverClasses() }; },
+    // arranger audio-clip insert. SYM.audio.hrv (data/cache/validated) names the track-as-HrV
+    // accessor; p.hrv overrides it (used by doctor to validate candidates). dispatch/ZjS/mode
+    // resolve structurally from the stable ArrangerClipInsertionPoint.
+    "track.insert_audio_clip": _audioInsertHandler,
+    // doctor-only alias: same insert, but under the gate-exempt resolver.* prefix so the audio
+    // reflection path can be validated on a throwaway track BEFORE symbols are validated.
+    "resolver.audio_probe_insert": _audioInsertHandler,
+    // doctor: candidate track-as-HrV accessor names for the SELECTED track (+ resolved parts),
+    // so the SDK can validate each by inserting a test wav. Select a track first.
+    "resolver.audio_candidates": function () {
+        var byU = cursorTrack.getDeepestTarget();
+        if (byU == null) return { error: "select a track first" };
+        var P; try { P = _acipParts(); } catch (e) { return { error: "" + e }; }
+        var cands = [], c = _classOf(byU), seen = {};
+        while (c != null) {
+            var ms = c.getDeclaredMethods();
+            for (var a = 0; a < ms.length; a++) {
+                var am = ms[a]; if (am.getParameterCount() !== 0) continue;
+                var an = "" + am.getName(); if (seen[an]) continue; seen[an] = 1;
+                if (P.hrvType.isAssignableFrom(am.getReturnType())) cands.push(an);
+            }
+            c = c.getSuperclass();
+        }
+        return { hrv_candidates: cands, dispatch: "" + P.dispatch.getName(),
+                 zjs: "" + P.dispatch.getParameterTypes()[1].getName() };
+    },
+    // doctor: record the validated audio HrV accessor + refresh the cache with it.
+    "resolver.set_audio_hrv": function (p) {
+        SYM.audio.hrv = "" + bget(p, "hrv", SYM.audio.hrv);
+        var c = _readCache();
+        if (c) { c.audio = SYM.audio; _writeCache(c); }
+        return { ok: true, hrv: SYM.audio.hrv };
+    },
+    // Where SYM's reader names came from this session (cache / seed) + the build fingerprint.
+    "resolver.status": function () {
+        var c = _readCache();
+        return { symbol_source: gSymSource, fingerprint: _fingerprint(),
+                 cache_exists: (c != null), cache_matches: (c != null && c.fingerprint === _fingerprint()),
+                 reader: { mX_: SYM.mX_, KRt: SYM.KRt, bf: SYM.bf, ngq: SYM.ngq, nI_: SYM.nI_, Xzy: SYM.Xzy, uEK: SYM.uEK } };
+    },
+    // Full round-trip probe on the document thread; fetch the report with resolver.result.
+    // The caller MUST have created + selected a throwaway track first (this writes to it).
+    // params: { blind: bool } - blind forces name-free structural discovery only (no name
+    // hints, no hardcoded fallback), simulating a build where the obfuscated names changed.
+    "resolver.probe": function (p) {
+        gProbe = null; gProbeErr = null;
+        var blind = !!bget(p, "blind", false);
+        _runOnDocumentThread(cursorTrack, function () {
+            var prevBlind = gBlindDiscovery;
+            // blind discovery overwrites SYM's reader names via _applyReaderNames with a
+            // possibly non-canonical set; snapshot them so the session is not left running
+            // on the blind picks after the probe.
+            var prevReader = blind ? { mX_: SYM.mX_, KRt: SYM.KRt, bf: SYM.bf, ngq: SYM.ngq,
+                                       nI_: SYM.nI_, Xzy: SYM.Xzy, uEK: SYM.uEK } : null;
+            gBlindDiscovery = blind;
+            if (blind) _AUTO_SYM = null;            // force a fresh structural-only resolution
+            try { gProbe = _runResolverProbe(); gProbe.blind = blind; return { ok: gProbe.ok }; }
+            catch (e) { gProbeErr = "" + e; return { error: gProbeErr }; }
+            finally {                                // don't leak the blind cache / reader picks
+                gBlindDiscovery = prevBlind;
+                if (blind) {
+                    _AUTO_SYM = null;
+                    SYM.mX_ = prevReader.mX_; SYM.KRt = prevReader.KRt; SYM.bf = prevReader.bf;
+                    SYM.ngq = prevReader.ngq; SYM.nI_ = prevReader.nI_; SYM.Xzy = prevReader.Xzy;
+                    SYM.uEK = prevReader.uEK;
+                }
+            }
+        });
+        return { queued: true, note: "fetch with resolver.result" };
+    },
+    "resolver.result": function () { return { report: gProbe, error: gProbeErr, ready: (gProbe != null || gProbeErr != null) }; },
     // Completion counter for async document-thread ops (clip create, automation write, ...).
     // The SDK reads it before firing an op and polls until it advances - replaces fixed
     // sleeps with "wait until the op actually finished" (faster + race-free).
@@ -884,28 +1830,6 @@ var HANDLERS = {
         } catch (e) {
             return { error: "" + e };
         }
-    },
-    // serialize the SELECTED track's internal object to bytes (Bitwig's own serializer, run in
-    // the document-edit context) -> stashed as base64; fetch with track.serialize_result. The
-    // parent reads it with ramona_serial to decode clips/notes (engine_playback_events) +
-    // automation. mode: "uEK" (default) or "SWC".
-    "track.serialize": function (p) {
-        gSerializeB64 = null; gSerializeErr = null;
-        var obj = cursorTrack.getDeepestTarget();
-        if (obj == null) return { error: "no track target (select a track first)" };
-        var mode = "" + (p.mode || "uEK");
-        _runOnDocumentThread(cursorTrack, function () {
-            try {
-                var SZo = Java.type("com.bitwig.ramona.serial.SZo");
-                var bytes = obj.SWC(mode === "SWC" ? SZo.SWC : SZo.uEK);
-                gSerializeB64 = "" + Java.type("java.util.Base64").getEncoder().encodeToString(bytes);
-                return { len: bytes.length };
-            } catch (e) { gSerializeErr = "" + e; return { error: "" + e }; }
-        });
-        return { queued: true, note: "fetch with track.serialize_result" };
-    },
-    "track.serialize_result": function (p) {
-        return { b64: gSerializeB64, error: gSerializeErr, ready: (gSerializeB64 != null || gSerializeErr != null) };
     },
     // generic in-process structured read of the SELECTED track's document graph (notes +
     // automation as real values). params: max_depth (default 12), max_nodes (default 6000).
@@ -1213,19 +2137,19 @@ var HANDLERS = {
         var depth = bget(p, "depth", 1) | 0;
         if (gCursorClip == null) return { error: "no cursor clip" };
         try {
-            var cwo = gCursorClip.mX_();
+            var cwo = _mx(gCursorClip);
             if (cwo == null) return { error: "cursor clip has no mX_ target" };
             // shallow walk: just enumerate this object's descriptors (no recursion)
             var descrs = _descriptors(cwo);
             var n = (descrs == null) ? 0 : descrs.size();
             var out = { _cls: (function () {
-                try { return "" + _inv0(cwo, "bf"); } catch (e) { return "?"; }
+                try { return "" + _inv0(cwo, SYM.bf); } catch (e) { return "?"; }
             })(), props: [] };
             for (var i = 0; i < n; i++) {
                 var d = descrs.get(i);
-                var pid; try { pid = "" + _inv0(d, "ngq"); } catch (e) { pid = "i" + i; }
+                var pid; try { pid = "" + _inv0(d, SYM.ngq); } catch (e) { pid = "i" + i; }
                 var val = null;
-                try { val = _jval(_inv1(d, "Xzy", cwo)); } catch (e) { val = "<err>"; }
+                try { val = _jval(_inv1(d, SYM.Xzy, cwo)); } catch (e) { val = "<err>"; }
                 out.props.push({ id: pid, value: val });
             }
             return out;
@@ -1241,18 +2165,18 @@ var HANDLERS = {
         if (gCursorClip == null) return { error: "no cursor clip" };
         _runOnDocumentThread(cursorTrack, function () {
             try {
-                var cwo = gCursorClip.mX_();
+                var cwo = _mx(gCursorClip);
                 if (cwo == null) throw "cursor clip has no mX_ target";
                 var descrs = _descriptors(cwo);
                 var n = (descrs == null) ? 0 : descrs.size();
                 var d = null;
                 for (var i = 0; i < n; i++) {
                     var dd = descrs.get(i);
-                    if (("" + _inv0(dd, "ngq")) === prop) { d = dd; break; }
+                    if (("" + _inv0(dd, SYM.ngq)) === prop) { d = dd; break; }
                 }
                 if (d == null) throw "prop " + prop + " not on cursor clip";
                 // Try the standard setter: uEK(uo1, value)
-                var m = _findMethod(d.getClass(), "uEK", 2, null);
+                var m = _findMethod(_classOf(d), SYM.uEK, 2, null);
                 if (m == null) throw "no setter on prop " + prop;
                 m.invoke(d, cwo, val);
                 return { ok: true, prop_id: prop, value: val };
@@ -1317,230 +2241,6 @@ var HANDLERS = {
         return { ok: false, error: "no insert-modulator action found" };
     },
 
-    // INSERT an audio clip from a .wav file onto the arranger at `start` (beats),
-    // duration `dur` beats. Same playbook as modulator.insert:
-    //   ArrangerClipInsertionPoint(HrV track, double startTime, double duration,
-    //                              FSY=null, clk_2=null)
-    //   .r3B(new File(path), ZjS.r3B, null)
-    // (HrV is the track-document interface; byU implements it. byi_2.r3B(File, ZjS, hha)
-    // at byi_2.java:130 is the base file dispatcher; both FSY and hha are nullable.)
-    // p: { track: N, path: "...wav", start: beat, duration?: beat }
-    "track.insert_audio_clip": function (p) {
-        var trackIdx = bget(p, "track", 0) | 0;
-        var path = "" + bget(p, "path", "");
-        var start = Number(bget(p, "start", 0));
-        var dur = Number(bget(p, "duration", 4));
-        if (!path) return { error: "no path" };
-        _runOnDocumentThread(cursorTrack, function () {
-            var t = trackBank.getItemAt(trackIdx);
-            var trackDoc = t.getDeepestTarget();
-            if (trackDoc == null) throw "track " + trackIdx + " has no document target";
-            // byU implements OkP() -> HrV (synthetic); the real accessor is TD() which
-            // returns a `miV` that IS-A HrV. Use it.
-            var trackAsHrV = _inv0(trackDoc, "TD");
-            if (trackAsHrV == null) throw "trackDoc.TD() returned null";
-            var ACIP = Java.type("com.bitwig.flt.document.core.iface.clipboard.clip.ArrangerClipInsertionPoint");
-            // pick the 5-arg constructor: (HrV, double, double, FSY, clk_2)
-            var ctors = ACIP.class.getDeclaredConstructors();
-            var ctor = null;
-            for (var i = 0; i < ctors.length; i++) {
-                if (ctors[i].getParameterCount() === 5) { ctor = ctors[i]; break; }
-            }
-            if (ctor == null) throw "ArrangerClipInsertionPoint 5-arg ctor not found";
-            ctor.setAccessible(true);
-            var Dbl = Java.type("java.lang.Double");
-            var aip = ctor.newInstance(trackAsHrV, Dbl.valueOf(start), Dbl.valueOf(dur), null, null);
-            var File = Java.type("java.io.File");
-            var ZjS = Java.type("ZjS");
-            var ok = aip.r3B(new File(path), ZjS.r3B, null);
-            return { dispatched: !!ok, path: path, start: start, duration: dur };
-        });
-        return { queued: true, path: path, start: start, duration: dur,
-                 note: "async; outcome in openwig_bridge.log [auto]" };
-    },
-
-    // INSERT a modulator from a .bwmodulator file path. Discovered via
-    // TestModulatorGrid.java:60-61 -- ModulatorGridInsertionPoint accepts
-    // (peb_0 modulator_grid, int gridX, int gridY, PKE pke=null); then
-    // byi_2.r3B(File, ZjS, hha) (line 130 of byi_2.java) loads the file +
-    // dispatches the insert (hha callback nullable). Bypasses preview-session
-    // orchestration entirely.
-    // p: { path: "C:/.../LFO.bwmodulator", x?: 0, y?: 0 }
-    "modulator.insert": function (p) {
-        var path = "" + bget(p, "path", "");
-        if (!path) return { error: "no path" };
-        var gx = bget(p, "x", 0) | 0;
-        var gy = bget(p, "y", 0) | 0;
-        _runOnDocumentThread(cursorTrack, function () {
-            var byU = cursorDevice.getDeepestTarget();
-            if (byU == null) throw "no cursor device target";
-            // walk to modulator_grid (cxt_2 prop 6727 on device)
-            var descrs = _descriptors(byU.mX_());
-            var mg = null;
-            for (var i = 0; i < descrs.size(); i++) {
-                var d = descrs.get(i);
-                try {
-                    if (("" + _inv0(d, "ngq")) === "6727") {
-                        try { mg = _inv1(d, "uEK", byU); } catch (e) {}
-                        break;
-                    }
-                } catch (e) {}
-            }
-            if (mg == null) throw "modulator_grid not reachable on cursor device";
-
-            // construct ModulatorGridInsertionPoint(peb_0, int, int, PKE=null)
-            var MGIP = Java.type("com.bitwig.flt.document.core.iface.clipboard.modulator.ModulatorGridInsertionPoint");
-            var ctors = MGIP.class.getDeclaredConstructors();
-            var ctor = null;
-            for (var c = 0; c < ctors.length; c++) {
-                if (ctors[c].getParameterCount() === 4) { ctor = ctors[c]; break; }
-            }
-            if (ctor == null) throw "ModulatorGridInsertionPoint 4-arg constructor not found";
-            ctor.setAccessible(true);
-            var Int = Java.type("java.lang.Integer");
-            var mgip = ctor.newInstance(mg, Int.valueOf(gx), Int.valueOf(gy), null);
-
-            // dispatch file insert: byi_2.r3B(File, ZjS, hha=null)
-            var File = Java.type("java.io.File");
-            var ZjS = Java.type("ZjS");
-            var ok = mgip.r3B(new File(path), ZjS.r3B, null);
-            return { dispatched: !!ok, path: path, x: gx, y: gy };
-        });
-        return { queued: true, path: path, note: "async; outcome in openwig_bridge.log [auto]" };
-    },
-
-    // SIDECHAIN: wire cursorDevice's sidechain input from another track's signal.
-    //   p: { source_track: N }
-    // Path discovered via ModuleGraphTests.java::sidechainPushingLatency:
-    //   - sink device has a `tkG` component (extends BOg/bog_3) in its components list
-    //   - tkG.fCq() returns the source-selector (dML/dml_2)
-    //   - dML.r3B(QcL) sets the source. QcL = a device's audio output via GVZ.jB1().
-    // The source-track's FIRST device's audio output is used as the source signal
-    // (chain it back to read post-FX by picking last device instead).
-    "device.set_sidechain_source": function (p) {
-        var srcIdx = bget(p, "source_track", 0) | 0;
-        var srcDevIdx = bget(p, "source_device_index", 0) | 0;
-        _runOnDocumentThread(cursorTrack, function () {
-            var sink = cursorDevice.getDeepestTarget();
-            if (sink == null) throw "no cursor device target (select sink device first)";
-            // 1. find the BOg (sidechain routing) component on the sink device
-            var lxh = _inv0(sink, "kGL");
-            if (lxh == null) throw "device has no kGL()";
-            var ayb = _findMethod(lxh.getClass(), "AYB", 0, null);
-            ayb.setAccessible(true);
-            var components = ayb.invoke(lxh);
-            var BOg = Java.type("BOg");
-            var bog = null;
-            for (var i = 0; i < components.size(); i++) {
-                var ci = components.get(i);
-                if (BOg.class.isAssignableFrom(ci.getClass())) { bog = ci; break; }
-            }
-            if (bog == null) throw "sink device has no BOg/sidechain routing component";
-            // 2. get its source selector
-            var selector = _inv0(bog, "fCq");
-            if (selector == null) throw "BOg.fCq() returned null";
-
-            // 3. obtain a source QcL = source track's specific device's audio output.
-            //    createDeviceBank() is init-only, so reach the source device document
-            //    obj directly. trackBank.getItemAt(srcIdx).getDeepestTarget() gives us
-            //    the source track's runtime object.
-            var srcTrack = trackBank.getItemAt(srcIdx);
-            var srcTrackDoc = srcTrack.getDeepestTarget();
-            if (srcTrackDoc == null) throw "source track document not reachable";
-            // walk track -> device_chain (cxt_2 atom child) -> devices (cxs_2 list) -> [srcDevIdx]
-            function _atomChild(uo1, propId) {
-                var dl = _descriptors(uo1.mX_());
-                for (var i = 0; i < dl.size(); i++) {
-                    var d = dl.get(i);
-                    try { if (("" + _inv0(d, "ngq")) === ("" + propId)) {
-                        try { return _inv1(d, "uEK", uo1); } catch (e) {} } } catch (e) {}
-                }
-                return null;
-            }
-            function _listChildren(uo1, propId) {
-                var dl = _descriptors(uo1.mX_());
-                for (var i = 0; i < dl.size(); i++) {
-                    var d = dl.get(i);
-                    try { if (("" + _inv0(d, "ngq")) === ("" + propId)) {
-                        return _relChildren(d, uo1); } } catch (e) {}
-                }
-                return null;
-            }
-            // track has device_chain at prop 356 (confirmed via debug_source_walk)
-            var dchain = _atomChild(srcTrackDoc, 356);
-            if (dchain == null) throw "source track has no device_chain (prop 356)";
-            // walk dchain children for a cxs_2 list of devices; scan ALL list-relationships
-            // and pick the first whose first element has a jB1() method (= a device)
-            var devList = null, srcDevObj = null;
-            var dchainDescr = _descriptors(dchain.mX_());
-            for (var jj = 0; jj < dchainDescr.size(); jj++) {
-                var dd = dchainDescr.get(jj);
-                try {
-                    var kids = _relChildren(dd, dchain);
-                    if (kids != null && kids.size() > srcDevIdx) {
-                        var candidate = kids.get(srcDevIdx);
-                        // does it have jB1()?
-                        var hasJB1 = _findMethod(candidate.getClass(), "jB1", 0, null);
-                        if (hasJB1 != null) {
-                            devList = kids; srcDevObj = candidate; break;
-                        }
-                    }
-                } catch (e) {}
-            }
-            if (srcDevObj == null) throw "no device with jB1() at index " + srcDevIdx + " on source track";
-            var srcQcL = _inv0(srcDevObj, "jB1");
-            if (srcQcL == null) throw "source device jB1() returned null (no audio output)";
-
-            // 4. wire selector -> source. dml_2 has multiple r3B overloads (QcL, Object,
-            // boolean...). Pick the one whose parameter type is assignable from srcQcL's
-            // class.
-            var setM = null;
-            var ms = selector.getClass().getMethods();
-            for (var k = 0; k < ms.length; k++) {
-                if (("" + ms[k].getName()) === "r3B" && ms[k].getParameterCount() === 1) {
-                    var pt = ms[k].getParameterTypes()[0];
-                    if (pt.isAssignableFrom(srcQcL.getClass())) { setM = ms[k]; break; }
-                }
-            }
-            if (setM == null) throw "no compatible r3B setter on selector";
-            setM.setAccessible(true);
-            setM.invoke(selector, srcQcL);
-            return { wired: true, source_track: srcIdx, source_device: srcDevIdx };
-        });
-        return { queued: true, note: "async; outcome in openwig_bridge.log [auto]" };
-    },
-
-    "modulator.list_sources": function () {
-        // Read the device's modulation_sources list via internals (prop 5438).
-        // Returns one entry per source with its display name (via hf() - found
-        // by enumerating String-returning methods on the source instance).
-        var byU = cursorDevice.getDeepestTarget();
-        if (byU == null) return { error: "no cursor device target" };
-        var cwo = byU.mX_();
-        var descrs = _descriptors(cwo);
-        var modList = null;
-        for (var i = 0; i < descrs.size(); i++) {
-            var d = descrs.get(i);
-            try {
-                if (("" + _inv0(d, "ngq")) === "5438") { modList = _relChildren(d, byU); break; }
-            } catch (e) {}
-        }
-        if (modList == null) return [];
-        var out = [];
-        for (var j = 0; j < modList.size(); j++) {
-            var s = modList.get(j);
-            var info = { index: j, name: "?", id: "?" };
-            try { info.name = "" + _inv0(s, "hf"); } catch (e) {}     // display name
-            try { info.id   = "" + _inv0(s, "cB_"); } catch (e) {}    // internal code
-            // fallback: blank display name -> use the id (e.g. "LFO", "RANDOM")
-            if (!info.name || info.name === "null" || info.name === "" || info.name === "?") {
-                info.name = info.id;
-            }
-            out.push(info);
-        }
-        return out;
-    },
-
     // ── routing introspection (SETTING routing is API-blocked + cxu_2 has no
     //    setter, only `find_first_sidechain_source_command` getter; per-device
     //    sidechain inputs are not exposed at schema level). This handler is
@@ -1556,83 +2256,19 @@ var HANDLERS = {
         return info;
     },
 
-    // p: { source_index: N, dest: "remote"|"volume"|"pan", remote_index: M, amount: -1..1 }
-    "modulator.map": function (p) {
-        var srcIdx = bget(p, "source_index", 0) | 0;
-        var dest = "" + bget(p, "dest", "remote");
-        var amount = Number(bget(p, "amount", 0.5));
-        _runOnDocumentThread(cursorTrack, function () {
-            var byU = cursorDevice.getDeepestTarget();
-            if (byU == null) throw "no cursor device target";
-            // find modulation_sources list (prop 5438) and pick the Nth source
-            var cwo = byU.mX_();
-            var descrs = _descriptors(cwo);
-            var modList = null;
-            for (var i = 0; i < descrs.size(); i++) {
-                var d = descrs.get(i);
-                if (("" + _inv0(d, "ngq")) === "5438") { modList = _relChildren(d, byU); break; }
-            }
-            if (modList == null || modList.size() <= srcIdx) throw "source_index out of range";
-            var src = modList.get(srcIdx);
-
-            // resolve destination to the canonical float-param atom (fj) - the SAME
-            // resolution the automation path uses. Passing the raw target of a remote
-            // control here is a proxy atom the audio engine can't modulate, so the
-            // mapping syncs to the engine malformed and crashes the native host.
-            // _fjFrom() unwraps the proxy down to the real modulatable atom; for
-            // volume/pan the atom already IS an fj, so they are unaffected.
-            var pp;
-            if (dest === "volume") pp = cursorTrack.volume();
-            else if (dest === "pan") pp = cursorTrack.pan();
-            else pp = remoteControlsPage.getParameter(bget(p, "remote_index", 0) | 0);
-            var destAtom = _fjFrom(_invokeNoArg(pp.getDeepestTarget(), "getAtom"));
-            if (destAtom == null) destAtom = _fjFrom(pp.getDeepestTarget());
-            if (destAtom == null) throw "could not resolve target fj for dest '" + dest + "'";
-
-            // build the cxu_2 set_default_modulation_mapping (op 3630, on class 766)
-            // and call its executor: cxu_2.r3B(UO1, List)
-            var WZK = Java.type("com.bitwig.flt.document.core.master.device.WZK");
-            var cmd = WZK.SWC.Mhm();    // returns the cxu_2 (per WZK.java:140)
-            var ArrayList = Java.type("java.util.ArrayList");
-            var Dbl = Java.type("java.lang.Double");
-            var args = new ArrayList();
-            args.add(destAtom);
-            args.add(Dbl.valueOf(amount));
-            cmd.r3B(src, args);
-            return { mapped: true, source_index: srcIdx, dest: dest, amount: amount };
-        });
-        return { queued: true, note: "async; outcome in openwig_bridge.log [auto]" };
-    },
-
     "tempo.write_offline": function (p) {
         var pts = p.points; if (!pts || !pts.length) return { error: "no points" };
         _runOnDocumentThread(cursorTrack, function () {
-            // tempo's atom lives on the transport / float_document - we resolve fj from
-            // the tempo parameter proxy.
+            // tempo's atom lives on the transport float_document. fj IS that document; its
+            // automation_lanes accessor + the value-ref factory + insert are the SAME cluster
+            // as track automation, so we reuse the structurally-discovered automation symbols
+            // (no obfuscated names): fj is byU (its lanes accessor yields the transport lanes).
             var tt = transport.tempo();
             var pp = tt.value ? tt.value() : tt;
             var fj = _fjFrom(_invokeNoArg(pp.getDeepestTarget(), "getAtom"));
             if (fj == null) fj = _fjFrom(pp.getDeepestTarget());
             if (fj == null) throw "could not resolve fj for tempo";
-            // fj IS the float_document that owns the tempo atom; its zer() returns
-            // the transport-level automation_lanes (same as automationWriteOffline
-            // does for track params, but sourced from the transport document, not
-            // the cursor track).
-            var al = _invokeNoArg(fj, "zer");
-            var a1x = Java.type("com.bitwig.flt.document.core.master.a1x").r3B(fj);
-            var oJk = Java.type("oJk"), LINEAR = oJk.Xzy, HOLD = oJk.r3B;
-            var Dbl = Java.type("java.lang.Double"), Bl = Java.type("java.lang.Boolean");
-            var m = _findAutomationInsert(al.getClass());
-            var n = 0;
-            for (var i = 0; i < pts.length; i++) {
-                var pt = pts[i];
-                var hasCurv = (pt.length > 2 && pt[2] != null);
-                var curv = hasCurv ? pt[2] : 0.0;
-                var interp = (pt.length > 3 && ("" + pt[3]) === "hold") ? HOLD : LINEAR;
-                m.invoke(al, a1x, Dbl.valueOf(pt[0]), Dbl.valueOf(pt[1]), Dbl.valueOf(curv),
-                         Bl.valueOf(hasCurv), Bl.FALSE, interp, null);
-                n++;
-            }
+            var n = _insertAutoDiscovered(fj, pp, pts);
             return { inserted: n, param: "tempo" };
         });
         return { queued: pts.length, note: "async; outcome in openwig_bridge.log [auto]" };

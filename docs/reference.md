@@ -76,9 +76,9 @@ them at the end of a chain, not in the middle.
 | `t.clips(segments)` | Multiple arranger clips. `segments`: `[(start, dur, notes), ...]`. |
 | `t.scene(slot, notes, dur, step_size)` | Launcher clip in slot `slot`. |
 | `t.launch(slot)` | Launch launcher slot. |
-| `t.audio_clip(path, start, duration)` | Drop a `.wav`/`.aiff` onto the arranger. |
-| `t.audio_clips(segments)` | Multiple audio clips: `[(path, start, dur), ...]`. |
 | `t.sample(path, slot)` | Load audio into a launcher slot (audio tracks). |
+| `t.audio_clip(path, start, duration)` | Drop a `.wav`/`.aiff` onto the arranger at `start` beats for `duration` beats (audio tracks; needs `openwig doctor` run once per build). |
+| `t.audio_clips(segments)` | Several arranger audio clips. `segments`: `[(path, start, duration), ...]`. |
 | `t.transpose_cursor(semitones)` | Transpose the selected clip. |
 | `t.quantize_cursor(amount)` | Quantize the selected clip's notes (`0..1`). |
 | `t.step_attr(x, key, attr, value)` | Set a per-note attribute on a step-grid clip. `attr`: `"velocity"` / `"chance"` / `"pan"` / `"timbre"` / `"pressure"` / `"duration"` / `"release"` / `"transpose"` / `"gain"`. |
@@ -107,5 +107,4 @@ them at the end of a chain, not in the middle.
 
 | Method | Description |
 |---|---|
-| `t.sidechain_from(source_track, source_device_index, sink_device_index)` | Wire a sidechain input (e.g. Compressor+ listening to the kick). Wires the currently-selected device; use `sink_device_index` to pick which one. |
 | `t.routing_info()` | Read current routing state (read-only). |
